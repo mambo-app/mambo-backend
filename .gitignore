@@ -1,0 +1,26 @@
+.env
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+firebase-service-account.json
+*.egg-info/
+.pytest_cache/
+
+# Debug and Diagnostic files
+debug*.json
+out.json
+conv_out.json
+mambo_crash.log
+schema_*.txt
+schema_notif.txt
+schema_output.txt
+schema_utf8.txt
+
+# Temp scripts
+tmp_*.py
+check_*.py
+test_db*.py
+test_notif.py
+fix_*.py
+convert_utf8.py

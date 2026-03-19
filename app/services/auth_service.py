@@ -1,0 +1,213 @@
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+from fastapi import HTTPException
+from app.core.config import settings
+from app.core.supabase import supabase_admin
+import logging
+
+logger = logging.getLogger('mambo.auth')
+
+class AuthService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def register(self, username: str, email: str, phone: str | None, password: str, invite_key: str) -> dict:
+        # 1. Check invite key
+        if invite_key != settings.invite_key:
+            raise HTTPException(
+                status_code=403,
+                detail='Invalid verification key. Please sign up again.'
+            )
+
+        # 2. Validate password strength
+        if len(password) < 8:
+            raise HTTPException(status_code=400, detail='Password must be at least 8 characters.')
+
+        # 3. Check username not taken in Neon
+        existing = await self.db.execute(
+            text('SELECT id FROM profiles WHERE username = :u'),
+            {'u': username}
+        )
+        if existing.fetchone():
+            raise HTTPException(status_code=409, detail='Username already taken.')
+
+        # 4. Create user in Supabase Admin
+        try:
+            res = supabase_admin.auth.admin.create_user({
+                "email": email,
+                "phone": phone,
+                "password": password,
+                "email_confirm": True,
+                "phone_confirm": True,
+                "user_metadata": {
+                    "username": username,
+                    "display_name": username
+                }
+            })
+            user_id = res.user.id
+        except Exception as e:
+            err_msg = str(e)
+            if 'already been registered' in err_msg or 'already exists' in err_msg or 'already registered' in err_msg.lower():
+                raise HTTPException(status_code=409, detail='Email already registered.')
+            raise HTTPException(status_code=400, detail=err_msg)
+
+        # 5. Create profile in Neon — identity fields only
+        phone_clean = phone.strip() if phone else None
+        try:
+            result = await self.db.execute(text('''
+                INSERT INTO profiles (
+                    id, username, display_name, email, phone_number, is_verified
+                )
+                VALUES (
+                    :id, :username, :username, :email, :phone, true
+                )
+                ON CONFLICT (id) DO UPDATE SET 
+                    username = :username,
+                    display_name = :username,
+                    email = :email,
+                    phone_number = :phone,
+                    is_verified = true
+                RETURNING *
+            '''), {
+                'id': user_id, 
+                'username': username,
+                'email': email,
+                'phone': phone_clean
+            })
+            await self.db.commit()
+        except IntegrityError as e:
+            await self.db.rollback()
+            await self._delete_supabase_user(user_id)
+            err_str = str(e)
+            if 'profiles_username_key' in err_str:
+                raise HTTPException(status_code=409, detail='Username already taken.')
+            if 'idx_profiles_email' in err_str:
+                raise HTTPException(status_code=409, detail='Email already registered in profile.')
+            raise HTTPException(status_code=409, detail='Registration failed due to profile conflict.')
+
+        # 6. Create default related rows
+        try:
+            # Stats
+            await self.db.execute(text('''
+                INSERT INTO user_stats (user_id) VALUES (:id)
+                ON CONFLICT (user_id) DO NOTHING
+            '''), {'id': user_id})
+
+            # Privacy
+            await self.db.execute(text('''
+                INSERT INTO privacy_settings (user_id) VALUES (:id)
+                ON CONFLICT (user_id) DO NOTHING
+            '''), {'id': user_id})
+
+            # Default Collections
+            default_collections = [
+                ('Watchlist', 'My watchlist of movies and shows', False),
+                ('Dropped', 'Content I stopped watching', False)
+            ]
+            for name, desc, is_public in default_collections:
+                await self.db.execute(text('''
+                    INSERT INTO collections (user_id, name, description, is_public)
+                    VALUES (:uid, :name, :desc, :public)
+                    ON CONFLICT DO NOTHING
+                '''), {
+                    'uid': user_id,
+                    'name': name,
+                    'desc': desc,
+                    'public': is_public
+                })
+
+            await self.db.commit()
+        except Exception as e:
+            logger.error(f"Failed to create related tables for {user_id}: {e}")
+            await self.db.rollback()
+
+        # 7. Return token + full profile
+        return await self.login(email, password)
+
+    async def login(self, email: str, password: str) -> dict:
+        from app.core.supabase import supabase
+        try:
+            auth_response = supabase.auth.sign_in_with_password({
+                "email": email,
+                "password": password
+            })
+            if not auth_response.user or not auth_response.session:
+                 raise Exception("Invalid credentials")
+                 
+            user_id = auth_response.user.id
+            access_token = auth_response.session.access_token
+        except Exception as e:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+
+        # Now get the profile
+        result = await self.db.execute(
+            text('SELECT * FROM profiles WHERE id = :id AND is_deleted = false'),
+            {'id': user_id}
+        )
+        profile = result.mappings().first()
+
+        if not profile:
+            raise HTTPException(
+                status_code=404,
+                detail='Profile not found. Please complete registration.'
+            )
+
+        return {
+            "access_token": access_token,
+            "refresh_token": auth_response.session.refresh_token,
+            "profile": dict(profile)
+        }
+
+    async def check_verified(self, user_id: str) -> dict:
+        result = await self.db.execute(
+            text('SELECT * FROM profiles WHERE id = :id AND is_deleted = false'),
+            {'id': user_id}
+        )
+        profile = result.mappings().first()
+
+        if not profile:
+            raise HTTPException(
+                status_code=401,
+                detail='Account not found. Please sign up.'
+            )
+
+        if not profile['is_verified']:
+            raise HTTPException(
+                status_code=403,
+                detail='Account not verified. Please sign up again.'
+            )
+
+        return dict(profile)
+
+    async def change_password(self, user_id: str, new_password: str):
+        try:
+            supabase_admin.auth.admin.update_user_by_id(
+                user_id,
+                {"password": new_password}
+            )
+        except Exception as e:
+            logger.error(f"Failed to change password for user {user_id}: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
+
+    async def refresh_token(self, refresh_token: str) -> dict:
+        from app.core.supabase import supabase
+        try:
+            auth_res = supabase.auth.refresh_session(refresh_token)
+            if not auth_res.user or not auth_res.session:
+                raise Exception("Refresh failed")
+            
+            return {
+                "access_token": auth_res.session.access_token,
+                "refresh_token": auth_res.session.refresh_token,
+                "user": auth_res.user
+            }
+        except Exception as e:
+            logger.error(f"Token refresh failed: {e}")
+            raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
+    async def _delete_supabase_user(self, user_id: str):
+        try:
+            supabase_admin.auth.admin.delete_user(user_id)
+        except Exception as e:
+            logger.error(f'Failed to delete Supabase user {user_id}: {e}')
