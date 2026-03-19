@@ -128,6 +128,15 @@ app.include_router(social.router,          prefix='/v1/social')
 app.include_router(admin.router,         prefix='/v1/admin')
 app.include_router(media.router,         prefix='/v1/media')
 
+@app.get("/")
+async def root():
+    return {
+        "message": "Welcome to Mambo API",
+        "version": "1.0.0",
+        "docs": "/docs" if not settings.is_production else "Contact admin for docs",
+        "health": "/health"
+    }
+
 @app.get('/health')
 async def health():
     """Real health check: pings the DB to verify connectivity."""
