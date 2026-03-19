@@ -2,7 +2,7 @@ fastapi
 uvicorn
 sqlalchemy
 asyncpg
-pydantic
+pydantic[email]
 pydantic-settings
 httpx
 tenacity
@@ -16,4 +16,3 @@ gitpython
 sentry-sdk
 orjson
 upstash-redis
-email-validator
