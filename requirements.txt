@@ -16,3 +16,4 @@ gitpython
 sentry-sdk
 orjson
 upstash-redis
+email-validator
