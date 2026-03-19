@@ -6,10 +6,12 @@ pydantic
 pydantic-settings
 httpx
 tenacity
-pyjwt
+PyJWT
 firebase-admin
 supabase
 python-multipart
 python-dotenv
 psycopg2-binary
 gitpython
+sentry-sdk
+orjson
