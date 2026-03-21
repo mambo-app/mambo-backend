@@ -163,14 +163,14 @@ class SocialRepository(BaseRepository):
             return await self.execute_returning('''
                 INSERT INTO post_comments (user_id, post_id, body, parent_id)
                 VALUES (:user_id, :post_id, :body, :parent_id)
-                RETURNING *
+                RETURNING id, user_id, post_id, body as content, parent_id, created_at, updated_at, is_deleted
             ''', {'user_id': user_id, 'post_id': post_id, 'body': content, 'parent_id': parent_id})
         elif review_id:
             # review_comments: (user_id, review_id, body, parent_id)
             return await self.execute_returning('''
                 INSERT INTO review_comments (user_id, review_id, body, parent_id)
                 VALUES (:user_id, :review_id, :body, :parent_id)
-                RETURNING *
+                RETURNING id, user_id, review_id, body as content, parent_id, created_at, updated_at, is_deleted
             ''', {'user_id': user_id, 'review_id': review_id, 'body': content, 'parent_id': parent_id})
         else:
             raise ValueError("Either post_id or review_id must be provided")
@@ -179,7 +179,8 @@ class SocialRepository(BaseRepository):
         """Fetch comments from the appropriate table."""
         if post_id:
             return await self.fetch_many('''
-                SELECT c.*, p.username, p.avatar_url, p.is_verified
+                SELECT c.id, c.user_id, c.post_id, c.body as content, c.parent_id, c.created_at, c.updated_at, c.is_deleted,
+                       p.username, p.avatar_url as user_avatar, p.is_verified
                 FROM post_comments c
                 JOIN profiles p ON p.id = c.user_id
                 WHERE c.post_id = :post_id AND c.is_deleted = false
@@ -188,7 +189,8 @@ class SocialRepository(BaseRepository):
             ''', {'post_id': post_id, 'limit': limit, 'offset': offset})
         else:
             return await self.fetch_many('''
-                SELECT c.*, p.username, p.avatar_url, p.is_verified
+                SELECT c.id, c.user_id, c.review_id, c.body as content, c.parent_id, c.created_at, c.updated_at, c.is_deleted,
+                       p.username, p.avatar_url as user_avatar, p.is_verified
                 FROM review_comments c
                 JOIN profiles p ON p.id = c.user_id
                 JOIN reviews r ON r.id = c.review_id
@@ -323,9 +325,12 @@ class SocialRepository(BaseRepository):
             SELECT r.*, 
                    r.rating as star_rating, 
                    r.is_spoiler as contains_spoiler,
-                   pr.username, pr.avatar_url, pr.is_verified
+                   pr.username, pr.avatar_url, pr.is_verified,
+                   c.title as content_title, 
+                   c.poster_url as content_poster
             FROM reviews r
             JOIN profiles pr ON pr.id = r.user_id
+            LEFT JOIN content c ON c.id = r.content_id
             WHERE r.user_id = :user_id AND r.is_deleted = false
             ORDER BY r.created_at DESC
             LIMIT :limit OFFSET :offset
@@ -341,7 +346,7 @@ class SocialRepository(BaseRepository):
                    c.poster_url as content_poster
             FROM reviews r
             JOIN profiles p ON p.id = r.user_id
-            JOIN content c ON c.id = r.content_id
+            LEFT JOIN content c ON c.id = r.content_id
             WHERE r.is_deleted = false
             ORDER BY (r.likes_count * 2 + r.comments_count) DESC, r.created_at DESC
             LIMIT :limit
@@ -352,9 +357,12 @@ class SocialRepository(BaseRepository):
             SELECT r.*, 
                    r.rating as star_rating, 
                    r.is_spoiler as contains_spoiler,
-                   pr.username, pr.avatar_url, pr.is_verified
+                   pr.username, pr.avatar_url, pr.is_verified,
+                   c.title as content_title, 
+                   c.poster_url as content_poster
             FROM reviews r
             JOIN profiles pr ON pr.id = r.user_id
+            LEFT JOIN content c ON c.id = r.content_id
             WHERE r.content_id = :content_id AND r.is_deleted = false
             ORDER BY r.created_at DESC
             LIMIT :limit OFFSET :offset

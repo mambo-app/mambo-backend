@@ -113,3 +113,13 @@ async def remove_item_from_collection(
     if not success:
         raise HTTPException(status_code=403, detail="Not authorized to modify this collection or item not found")
     return ok({"success": True})
+
+@router.get('/item-status/{content_id}', response_model=Dict[str, Any])
+async def get_content_collection_status(
+    content_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
+    service = CollectionService(db)
+    collection_ids = await service.get_content_collection_status(UUID(user_id), content_id)
+    return ok({"collection_ids": collection_ids})

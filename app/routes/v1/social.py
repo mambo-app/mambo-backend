@@ -91,7 +91,7 @@ async def get_post(
     service = SocialService(db)
     return await service.get_post(post_id)
 
-@router.post('/comments', response_model=CommentResponse)
+@router.post('/comments')
 async def create_comment(
     request: CommentCreateRequest,
     post_id: UUID | None = None,
@@ -99,16 +99,18 @@ async def create_comment(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
+    from app.models.common import ok
     service = SocialService(db)
-    return await service.create_comment(
+    result = await service.create_comment(
         UUID(user_id), 
         request.content, 
         post_id=post_id, 
         review_id=review_id, 
         parent_id=request.parent_id
     )
+    return ok(result)
 
-@router.get('/comments', response_model=List[CommentResponse])
+@router.get('/comments')
 async def get_comments(
     post_id: UUID | None = None,
     review_id: UUID | None = None,
@@ -116,8 +118,10 @@ async def get_comments(
     offset: int = 0,
     db: AsyncSession = Depends(get_db)
 ):
+    from app.models.common import ok
     service = SocialService(db)
-    return await service.get_comments(post_id, review_id, limit, offset)
+    items = await service.get_comments(post_id, review_id, limit, offset)
+    return ok(items)
 
 @router.post('/interactions/upvote')
 async def toggle_upvote(

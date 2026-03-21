@@ -207,3 +207,13 @@ class CollectionService:
         
         res = await self.db.execute(text(query), params)
         return [dict(row) for row in res.mappings()]
+
+    async def get_content_collection_status(self, user_id: UUID, content_id: UUID) -> List[UUID]:
+        """Return a list of collection IDs that contain this content for the user."""
+        res = await self.db.execute(text('''
+            SELECT ci.collection_id 
+            FROM collection_items ci
+            JOIN collections c ON c.id = ci.collection_id
+            WHERE c.user_id = :user_id AND ci.content_id = :content_id
+        '''), {'user_id': user_id, 'content_id': content_id})
+        return [row[0] for row in res.fetchall()]
