@@ -111,6 +111,8 @@ async def init_db(db: AsyncSession):
     await add_col("collections", "is_deletable",     "BOOLEAN DEFAULT true")
     await add_col("collections", "item_count",       "INTEGER DEFAULT 0")
     await add_col("collections", "visibility",       "TEXT DEFAULT 'private'")
+    await add_col("collections", "is_pinned",        "BOOLEAN DEFAULT false")
+    await add_col("collections", "pin_order",        "INTEGER DEFAULT 0")
     await add_col("collections", "updated_at",       "TIMESTAMPTZ DEFAULT now()")
 
     # ── collection_items ───────────────────────────────────────────────────────
