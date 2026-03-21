@@ -96,14 +96,18 @@ async def init_db(db: AsyncSession):
             )
         '''))
         
-        # Heal content
+        # Heal content — add ALL columns that may be missing from old schema
         cols_content = {
-            "tmdb_id": "INTEGER UNIQUE",
-            "mal_id": "INTEGER UNIQUE",
+            "content_type": "TEXT NOT NULL DEFAULT 'movie'",
+            "tmdb_id": "INTEGER",
+            "mal_id": "INTEGER",
             "original_title": "TEXT",
             "synopsis": "TEXT",
+            "poster_url": "TEXT",
             "backdrop_url": "TEXT",
+            "external_rating": "FLOAT",
             "external_rating_source": "TEXT",
+            "release_date": "DATE",
             "status": "TEXT",
             "anime_studio": "TEXT",
             "total_episodes": "INTEGER",
