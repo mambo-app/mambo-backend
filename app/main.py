@@ -39,8 +39,13 @@ async def lifespan(app: FastAPI):
     logger = logging.getLogger('mambo.scheduler')
 
     # Run schema migrations/init once at startup
+    from app.core.init_db import init_db
     async with AsyncSessionLocal() as db:
         logger.info("Initializing schemas at startup")
+        await init_db(db)
+        
+        from app.services.chat_service import ChatService
+        from app.services.news_service import NewsService
         from app.services.notification_service import NotificationService
         await ChatService(db).init_schema()
         await NewsService(db).init_table()
