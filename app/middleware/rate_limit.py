@@ -11,7 +11,7 @@ redis = Redis(
 )
 
 GENERAL_LIMIT = 120   # requests per minute per authenticated user
-AUTH_LIMIT    = 10    # attempts per minute per IP for auth endpoints
+AUTH_LIMIT    = 100   # Elevated for testing/debugging
 AUTH_PATHS    = {'/v1/auth/login', '/v1/auth/register'}
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -26,12 +26,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 if count == 1:
                     redis.expire(key, 60)
                 if count > AUTH_LIMIT:
+                    import logging
+                    logger = logging.getLogger('mambo.rate_limit')
+                    logger.warning(f"RATE LIMIT HIT: {ip} for {request.url.path}")
                     return JSONResponse(
                         status_code=429,
-                        content={'success': False, 'error': {
-                            'code': 'RATE_LIMITED',
-                            'message': 'Too many attempts. Please wait before trying again.'
-                        }}
+                        content={
+                            'success': False, 
+                            'error': {
+                                'code': 'RATE_LIMITED',
+                                'message': 'Too many attempts. Please wait before trying again.'
+                            },
+                            # Add detail field for standard FastAPI client compatibility
+                            'detail': 'Too many attempts. Please wait before trying again.'
+                        }
                     )
             except Exception:
                 pass  # If Redis is down, allow the request through

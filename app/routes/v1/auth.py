@@ -29,6 +29,10 @@ async def register(
     from app.services.auth_service import AuthService
     service = AuthService(db)
     
+    import logging
+    logger = logging.getLogger('mambo.auth')
+    logger.debug(f"Registering user: {body.username} ({body.email})")
+    
     result = await service.register(
         username=body.username,
         email=body.email,
@@ -45,6 +49,9 @@ async def login(
 ):
     from app.services.auth_service import AuthService
     service = AuthService(db)
+    import logging
+    logger = logging.getLogger('mambo.auth')
+    logger.debug(f"Login attempt for: {body.email}")
     result = await service.login(body.email, body.password)
     return ok(result)
 
