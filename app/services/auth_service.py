@@ -102,19 +102,31 @@ class AuthService:
 
             # Default Collections
             default_collections = [
-                ('Watchlist', 'My watchlist of movies and shows', False),
-                ('Dropped', 'Content I stopped watching', False)
+                # name, desc, is_public, is_default, is_pinned, pin_order
+                ('Watchlist', 'My watchlist of movies and shows', False, True, True, 1),
+                ('Dropped', 'Content I stopped watching', False, True, True, 2)
             ]
-            for name, desc, is_public in default_collections:
+            for name, desc, is_public, is_def, is_pin, pin_ord in default_collections:
                 await self.db.execute(text('''
-                    INSERT INTO collections (user_id, name, description, is_public)
-                    VALUES (:uid, :name, :desc, :public)
+                    INSERT INTO collections (
+                        user_id, name, description, is_public, 
+                        collection_type, is_default, is_deletable,
+                        is_pinned, pin_order
+                    )
+                    VALUES (
+                        :uid, :name, :desc, :public, 
+                        'system', :is_def, false,
+                        :is_pin, :pin_ord
+                    )
                     ON CONFLICT DO NOTHING
                 '''), {
                     'uid': user_id,
                     'name': name,
                     'desc': desc,
-                    'public': is_public
+                    'public': is_public,
+                    'is_def': is_def,
+                    'is_pin': is_pin,
+                    'pin_ord': pin_ord
                 })
 
             await self.db.commit()
