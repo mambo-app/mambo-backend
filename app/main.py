@@ -43,13 +43,6 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as db:
         logger.info("Initializing schemas at startup")
         await init_db(db)
-        
-        from app.services.chat_service import ChatService
-        from app.services.news_service import NewsService
-        from app.services.notification_service import NotificationService
-        await ChatService(db).init_schema()
-        await NewsService(db).init_table()
-        await NotificationService(db).init_schema()
 
     async def run_news_scheduler():
         while True:
