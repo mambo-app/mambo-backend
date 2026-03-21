@@ -13,6 +13,9 @@ engine = create_async_engine(
     pool_pre_ping=True,
     pool_recycle=1800,
     echo=False,
+    # Disable prepared statement caching to prevent stale plan errors
+    # after ALTER TABLE schema changes (InvalidCachedStatementError)
+    connect_args={"statement_cache_size": 0},
 )
 
 AsyncSessionLocal = async_sessionmaker(
