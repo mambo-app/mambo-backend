@@ -6,498 +6,273 @@ logger = logging.getLogger('mambo.db_init')
 
 async def init_db(db: AsyncSession):
     """
-    Ensures all tables exist and have the correct columns.
-    This script handles both fresh installations and "healing" existing databases
-    by adding missing columns to tables that already exist.
+    Heals the existing Neon database by adding any missing columns to existing tables.
+    Uses ALTER TABLE ... ADD COLUMN IF NOT EXISTS so it's fully safe to run repeatedly.
+    The actual table structure was defined via the Neon dashboard DDL.
     """
-    logger.info("Initializing database schema...")
-    
+    logger.info("Running database schema healing...")
+
     try:
-        # 0. Core Extensions
         await db.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
         await db.commit()
+    except Exception as e:
+        logger.warning(f"pgcrypto extension: {e}")
+        await db.rollback()
 
-        # 1. Profiles & Stats
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.profiles (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                username text UNIQUE NOT NULL,
-                display_name text,
-                avatar_url text,
-                bio text,
-                birthday date,
-                gender text,
-                email text,
-                phone_number text,
-                activity_visibility text DEFAULT 'public',
-                favourites_visibility text DEFAULT 'public',
-                reviews_visibility text DEFAULT 'public',
-                push_notifications_enabled boolean DEFAULT true,
-                is_verified boolean DEFAULT false,
-                is_deleted boolean DEFAULT false,
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now()
-            )
-        '''))
-        
-        # Heal profiles
-        cols_profiles = {
-            "birthday": "DATE",
-            "gender": "TEXT",
-            "email": "TEXT",
-            "phone_number": "TEXT",
-            "activity_visibility": "TEXT DEFAULT 'public'",
-            "favourites_visibility": "TEXT DEFAULT 'public'",
-            "reviews_visibility": "TEXT DEFAULT 'public'",
-            "push_notifications_enabled": "BOOLEAN DEFAULT true",
-            "search_vector": "TSVECTOR"
-        }
-        for col, dtype in cols_profiles.items():
-            await db.execute(text(f"ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS {col} {dtype}"))
-        
-        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_profiles_search_vector ON profiles USING gin(search_vector)"))
+    # Helper to run ALTER TABLE safely
+    async def add_col(table: str, col: str, dtype: str):
+        try:
+            await db.execute(text(
+                f"ALTER TABLE public.{table} ADD COLUMN IF NOT EXISTS {col} {dtype}"
+            ))
+        except Exception as e:
+            logger.warning(f"add_col {table}.{col}: {e}")
+            await db.rollback()
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.user_stats (
-                user_id uuid PRIMARY KEY REFERENCES public.profiles(id) ON DELETE CASCADE,
-                friends_count integer DEFAULT 0,
-                followers_count integer DEFAULT 0,
-                following_count integer DEFAULT 0,
-                total_watched integer DEFAULT 0,
-                total_reviews integer DEFAULT 0,
-                total_posts integer DEFAULT 0,
-                updated_at timestamptz DEFAULT now()
-            )
-        '''))
+    # ── profiles ───────────────────────────────────────────────────────────────
+    await add_col("profiles", "bio",                         "TEXT")
+    await add_col("profiles", "birthday",                    "DATE")
+    await add_col("profiles", "gender",                      "TEXT")
+    await add_col("profiles", "email",                       "TEXT")
+    await add_col("profiles", "phone_number",                "TEXT")
+    await add_col("profiles", "activity_visibility",         "TEXT DEFAULT 'public'")
+    await add_col("profiles", "favourites_visibility",       "TEXT DEFAULT 'public'")
+    await add_col("profiles", "reviews_visibility",          "TEXT DEFAULT 'public'")
+    await add_col("profiles", "push_notifications_enabled",  "BOOLEAN DEFAULT true")
+    await add_col("profiles", "search_vector",               "TSVECTOR")
+    await add_col("profiles", "is_deleted",                  "BOOLEAN DEFAULT false")
+    await add_col("profiles", "updated_at",                  "TIMESTAMPTZ DEFAULT now()")
 
-        # 2. Content & Credits
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.content (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                tmdb_id integer UNIQUE,
-                mal_id integer UNIQUE,
-                content_type text NOT NULL,
-                title text NOT NULL,
-                original_title text,
-                synopsis text,
-                poster_url text,
-                backdrop_url text,
-                external_rating float,
-                external_rating_source text,
-                release_date date,
-                status text,
-                anime_studio text,
-                total_episodes integer,
-                genres text[] DEFAULT '{}',
-                is_permanent boolean DEFAULT false,
-                made_permanent_at timestamptz,
-                last_synced_at timestamptz DEFAULT now(),
-                created_at timestamptz DEFAULT now()
-            )
-        '''))
-        
-        # Heal content — add ALL columns that may be missing from old schema
-        cols_content = {
-            "content_type": "TEXT NOT NULL DEFAULT 'movie'",
-            "tmdb_id": "INTEGER",
-            "mal_id": "INTEGER",
-            "original_title": "TEXT",
-            "synopsis": "TEXT",
-            "poster_url": "TEXT",
-            "backdrop_url": "TEXT",
-            "external_rating": "FLOAT",
-            "external_rating_source": "TEXT",
-            "release_date": "DATE",
-            "status": "TEXT",
-            "anime_studio": "TEXT",
-            "total_episodes": "INTEGER",
-            "genres": "TEXT[] DEFAULT '{}'",
-            "is_permanent": "BOOLEAN DEFAULT false",
-            "made_permanent_at": "TIMESTAMPTZ",
-            "last_synced_at": "TIMESTAMPTZ DEFAULT now()"
-        }
-        for col, dtype in cols_content.items():
-            await db.execute(text(f"ALTER TABLE public.content ADD COLUMN IF NOT EXISTS {col} {dtype}"))
+    # ── user_stats ─────────────────────────────────────────────────────────────
+    await add_col("user_stats", "friends_count",   "INTEGER DEFAULT 0")
+    await add_col("user_stats", "followers_count", "INTEGER DEFAULT 0")
+    await add_col("user_stats", "following_count", "INTEGER DEFAULT 0")
+    await add_col("user_stats", "total_watched",   "INTEGER DEFAULT 0")
+    await add_col("user_stats", "total_reviews",   "INTEGER DEFAULT 0")
+    await add_col("user_stats", "total_posts",     "INTEGER DEFAULT 0")
+    await add_col("user_stats", "updated_at",      "TIMESTAMPTZ DEFAULT now()")
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.persons (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                tmdb_id integer UNIQUE,
-                name text NOT NULL,
-                profile_image_url text,
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now()
-            )
-        '''))
+    # ── content ────────────────────────────────────────────────────────────────
+    await add_col("content", "content_type",           "TEXT NOT NULL DEFAULT 'movie'")
+    await add_col("content", "tmdb_id",                "INTEGER")
+    await add_col("content", "mal_id",                 "INTEGER")
+    await add_col("content", "original_title",         "TEXT")
+    await add_col("content", "synopsis",               "TEXT")
+    await add_col("content", "poster_url",             "TEXT")
+    await add_col("content", "backdrop_url",           "TEXT")
+    await add_col("content", "external_rating",        "FLOAT")
+    await add_col("content", "external_rating_source", "TEXT")
+    await add_col("content", "release_date",           "DATE")
+    await add_col("content", "status",                 "TEXT")
+    await add_col("content", "anime_studio",           "TEXT")
+    await add_col("content", "total_episodes",         "INTEGER")
+    await add_col("content", "genres",                 "TEXT[] DEFAULT '{}'")
+    await add_col("content", "is_permanent",           "BOOLEAN DEFAULT false")
+    await add_col("content", "made_permanent_at",      "TIMESTAMPTZ")
+    await add_col("content", "last_synced_at",         "TIMESTAMPTZ DEFAULT now()")
+    await add_col("content", "created_at",             "TIMESTAMPTZ DEFAULT now()")
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.content_credits (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                content_id uuid NOT NULL REFERENCES public.content(id) ON DELETE CASCADE,
-                person_id uuid NOT NULL REFERENCES public.persons(id) ON DELETE CASCADE,
-                role text NOT NULL,
-                character_name text,
-                job text,
-                department text,
-                display_order integer DEFAULT 0,
-                created_at timestamptz DEFAULT now(),
-                UNIQUE(content_id, person_id, role)
-            )
-        '''))
+    # ── reviews ────────────────────────────────────────────────────────────────
+    # The actual reviews table may be missing these if created from old schema
+    await add_col("reviews", "rating",            "FLOAT")
+    await add_col("reviews", "star_rating",       "INTEGER")
+    await add_col("reviews", "text_review",       "TEXT")
+    await add_col("reviews", "contains_spoiler",  "BOOLEAN DEFAULT false")
+    await add_col("reviews", "is_spoiler",        "BOOLEAN DEFAULT false")
+    await add_col("reviews", "tags",              "TEXT[] DEFAULT '{}'")
+    await add_col("reviews", "likes_count",       "INTEGER DEFAULT 0")
+    await add_col("reviews", "comments_count",    "INTEGER DEFAULT 0")
+    await add_col("reviews", "shares_count",      "INTEGER DEFAULT 0")
+    await add_col("reviews", "saves_count",       "INTEGER DEFAULT 0")
+    await add_col("reviews", "upvotes_count",     "INTEGER DEFAULT 0")
+    await add_col("reviews", "is_deleted",        "BOOLEAN DEFAULT false")
+    await add_col("reviews", "deleted_at",        "TIMESTAMPTZ")
+    await add_col("reviews", "updated_at",        "TIMESTAMPTZ DEFAULT now()")
 
-        # 3. Social & Discussions
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.posts (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                content_id uuid REFERENCES public.content(id) ON DELETE SET NULL,
-                title text,
-                body text NOT NULL,
-                media_urls text[] DEFAULT '{}',
-                upvotes_count integer DEFAULT 0,
-                comments_count integer DEFAULT 0,
-                shares_count integer DEFAULT 0,
-                saves_count integer DEFAULT 0,
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now()
-            )
-        '''))
-        
-        # Heal posts
-        cols_posts = {
-            "upvotes_count": "INTEGER DEFAULT 0",
-            "comments_count": "INTEGER DEFAULT 0",
-            "shares_count": "INTEGER DEFAULT 0",
-            "saves_count": "INTEGER DEFAULT 0",
-            "updated_at": "TIMESTAMPTZ DEFAULT now()"
-        }
-        for col, dtype in cols_posts.items():
-            await db.execute(text(f"ALTER TABLE public.posts ADD COLUMN IF NOT EXISTS {col} {dtype}"))
+    # Unique constraint for upsert
+    try:
+        await db.execute(text(
+            "ALTER TABLE public.reviews ADD CONSTRAINT reviews_user_content_unique "
+            "UNIQUE (user_id, content_id)"
+        ))
+    except Exception:
+        pass  # Already exists
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.reviews (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                content_id uuid NOT NULL REFERENCES public.content(id) ON DELETE CASCADE,
-                rating float NOT NULL,
-                text_review text,
-                is_spoiler boolean DEFAULT false,
-                likes_count integer DEFAULT 0,
-                comments_count integer DEFAULT 0,
-                shares_count integer DEFAULT 0,
-                saves_count integer DEFAULT 0,
-                is_deleted boolean DEFAULT false,
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now()
-            )
-        '''))
-        
-        # Heal reviews
-        cols_reviews = {
-            "likes_count": "INTEGER DEFAULT 0",
-            "comments_count": "INTEGER DEFAULT 0",
-            "shares_count": "INTEGER DEFAULT 0",
-            "saves_count": "INTEGER DEFAULT 0",
-            "is_deleted": "BOOLEAN DEFAULT false",
-            "updated_at": "TIMESTAMPTZ DEFAULT now()"
-        }
-        for col, dtype in cols_reviews.items():
-            await db.execute(text(f"ALTER TABLE public.reviews ADD COLUMN IF NOT EXISTS {col} {dtype}"))
+    # ── posts ──────────────────────────────────────────────────────────────────
+    await add_col("posts", "upvotes_count",   "INTEGER DEFAULT 0")
+    await add_col("posts", "comments_count",  "INTEGER DEFAULT 0")
+    await add_col("posts", "shares_count",    "INTEGER DEFAULT 0")
+    await add_col("posts", "saves_count",     "INTEGER DEFAULT 0")
+    await add_col("posts", "updated_at",      "TIMESTAMPTZ DEFAULT now()")
 
-        # Comment Tables
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.post_comments (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                post_id uuid NOT NULL REFERENCES public.posts(id) ON DELETE CASCADE,
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                body text NOT NULL,
-                parent_id uuid REFERENCES public.post_comments(id) ON DELETE CASCADE,
-                is_deleted boolean DEFAULT false,
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now()
-            )
-        '''))
+    # ── collections ────────────────────────────────────────────────────────────
+    await add_col("collections", "collection_type",  "TEXT DEFAULT 'user'")
+    await add_col("collections", "is_default",       "BOOLEAN DEFAULT false")
+    await add_col("collections", "is_deletable",     "BOOLEAN DEFAULT true")
+    await add_col("collections", "item_count",       "INTEGER DEFAULT 0")
+    await add_col("collections", "visibility",       "TEXT DEFAULT 'private'")
+    await add_col("collections", "updated_at",       "TIMESTAMPTZ DEFAULT now()")
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.review_comments (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                review_id uuid NOT NULL REFERENCES public.reviews(id) ON DELETE CASCADE,
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                body text NOT NULL,
-                parent_id uuid REFERENCES public.review_comments(id) ON DELETE CASCADE,
-                is_deleted boolean DEFAULT false,
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now()
-            )
-        '''))
+    # ── collection_items ───────────────────────────────────────────────────────
+    await add_col("collection_items", "added_by",  "UUID")
 
-        # Like/Upvote Tables
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.post_upvotes (
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                post_id uuid NOT NULL REFERENCES public.posts(id) ON DELETE CASCADE,
-                created_at timestamptz DEFAULT now(),
-                PRIMARY KEY (user_id, post_id)
-            )
-        '''))
+    # ── conversations ──────────────────────────────────────────────────────────
+    await add_col("conversations", "direct_pair_key",  "TEXT")
+    await add_col("conversations", "title",            "TEXT")
+    await add_col("conversations", "last_message_id",  "UUID")
+    await add_col("conversations", "last_message_at",  "TIMESTAMPTZ")
+    await add_col("conversations", "updated_at",       "TIMESTAMPTZ DEFAULT now()")
+    try:
+        await db.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_direct_pair ON public.conversations(direct_pair_key)"
+        ))
+    except Exception:
+        pass
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.review_likes (
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                review_id uuid NOT NULL REFERENCES public.reviews(id) ON DELETE CASCADE,
-                created_at timestamptz DEFAULT now(),
-                PRIMARY KEY (user_id, review_id)
-            )
-        '''))
+    # ── messages ───────────────────────────────────────────────────────────────
+    await add_col("messages", "shared_content_id",      "UUID")
+    await add_col("messages", "shared_review_id",       "UUID")
+    await add_col("messages", "shared_post_id",         "UUID")
+    await add_col("messages", "shared_news_id",         "UUID")
+    await add_col("messages", "message_type",           "TEXT DEFAULT 'text'")
+    await add_col("messages", "image_url",              "TEXT")
+    await add_col("messages", "is_read",                "BOOLEAN DEFAULT false")
+    await add_col("messages", "read_at",                "TIMESTAMPTZ")
+    await add_col("messages", "deleted_by_sender",      "BOOLEAN DEFAULT false")
+    await add_col("messages", "deleted_by_receiver",    "BOOLEAN DEFAULT false")
 
-        # 4. Social Relationships
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.friends (
-                user_id1 uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                user_id2 uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                created_at timestamptz DEFAULT now(),
-                PRIMARY KEY (user_id1, user_id2),
-                CHECK (user_id1 < user_id2)
-            )
-        '''))
+    # ── notifications ──────────────────────────────────────────────────────────
+    await add_col("notifications", "actor_id",             "UUID")
+    await add_col("notifications", "related_id",           "UUID")
+    await add_col("notifications", "aggregate_key",        "TEXT")
+    await add_col("notifications", "aggregate_count",      "INTEGER DEFAULT 1")
+    await add_col("notifications", "first_actor_id",       "UUID")
+    await add_col("notifications", "latest_actor_id",      "UUID")
+    await add_col("notifications", "last_updated_at",      "TIMESTAMPTZ DEFAULT now()")
+    await add_col("notifications", "is_deleted",           "BOOLEAN DEFAULT false")
+    await add_col("notifications", "deleted_at",           "TIMESTAMPTZ")
+    await add_col("notifications", "related_content_id",   "UUID")
+    await add_col("notifications", "related_review_id",    "UUID")
+    await add_col("notifications", "related_post_id",      "UUID")
+    await add_col("notifications", "related_collection_id","UUID")
+    try:
+        await db.execute(text(
+            "ALTER TABLE public.notifications ALTER COLUMN title DROP NOT NULL"
+        ))
+    except Exception:
+        pass
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.friend_requests (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                sender_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                receiver_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                status text DEFAULT 'pending',
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now(),
-                UNIQUE(sender_id, receiver_id)
-            )
-        '''))
+    # ── news_articles ──────────────────────────────────────────────────────────
+    await add_col("news_articles", "external_url",     "TEXT")
+    await add_col("news_articles", "is_permanent",     "BOOLEAN DEFAULT false")
+    await add_col("news_articles", "likes_count",      "INTEGER DEFAULT 0")
+    await add_col("news_articles", "comments_count",   "INTEGER DEFAULT 0")
+    await add_col("news_articles", "shares_count",     "INTEGER DEFAULT 0")
+    await add_col("news_articles", "is_active",        "BOOLEAN DEFAULT true")
+    await add_col("news_articles", "fetched_at",       "TIMESTAMPTZ DEFAULT now()")
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.follows (
-                follower_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                following_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                created_at timestamptz DEFAULT now(),
-                PRIMARY KEY (follower_id, following_id)
-            )
-        '''))
+    # ── persons ────────────────────────────────────────────────────────────────
+    await add_col("persons", "mal_id",          "INTEGER")
+    await add_col("persons", "bio",             "TEXT")
+    await add_col("persons", "birth_date",      "DATE")
+    await add_col("persons", "death_date",      "DATE")
+    await add_col("persons", "place_of_birth",  "VARCHAR")
+    await add_col("persons", "known_for",       "TEXT")
+    await add_col("persons", "updated_at",      "TIMESTAMPTZ DEFAULT now()")
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.muted_users (
-                muter_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                muted_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                created_at timestamptz DEFAULT now(),
-                PRIMARY KEY (muter_id, muted_id)
-            )
-        '''))
+    # ── privacy_settings (create if missing) ───────────────────────────────────
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.privacy_settings (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id uuid NOT NULL UNIQUE REFERENCES public.profiles(id) ON DELETE CASCADE,
+            activity_visibility text DEFAULT 'public',
+            reviews_visibility text DEFAULT 'public',
+            posts_visibility text DEFAULT 'public',
+            favourites_visibility text DEFAULT 'public',
+            stats_visibility text DEFAULT 'public',
+            watchlist_visibility text DEFAULT 'private',
+            watched_visibility text DEFAULT 'private',
+            liked_visibility text DEFAULT 'private',
+            dropped_visibility text DEFAULT 'private',
+            custom_collections_visibility text DEFAULT 'friends',
+            show_birthday boolean DEFAULT false,
+            show_gender boolean DEFAULT false,
+            created_at timestamptz DEFAULT now(),
+            updated_at timestamptz DEFAULT now()
+        )
+    '''))
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.blocked_users (
-                blocker_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                blocked_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                created_at timestamptz DEFAULT now(),
-                PRIMARY KEY (blocker_id, blocked_id)
-            )
-        '''))
+    # ── push_tokens (create if missing) ────────────────────────────────────────
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.push_tokens (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+            token text NOT NULL UNIQUE,
+            platform text NOT NULL,
+            updated_at timestamptz DEFAULT now(),
+            UNIQUE(user_id, token)
+        )
+    '''))
 
-        # 5. User Activity & Status
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.user_content_status (
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                content_id uuid NOT NULL REFERENCES public.content(id) ON DELETE CASCADE,
-                is_watched boolean DEFAULT false,
-                is_liked boolean DEFAULT false,
-                is_dropped boolean DEFAULT false,
-                is_interested boolean DEFAULT false,
-                watch_count integer DEFAULT 0,
-                rating float,
-                first_watched_at timestamptz,
-                last_watched_at timestamptz,
-                updated_at timestamptz DEFAULT now(),
-                PRIMARY KEY (user_id, content_id)
-            )
-        '''))
+    # ── search_history ─────────────────────────────────────────────────────────
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.search_history (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+            query text NOT NULL,
+            content_type_filter text,
+            searched_at timestamptz DEFAULT now()
+        )
+    '''))
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.watch_history (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                content_id uuid NOT NULL REFERENCES public.content(id) ON DELETE CASCADE,
-                watch_type text DEFAULT 'first_watch',
-                watched_at timestamptz DEFAULT now()
-            )
-        '''))
+    # ── reported_content (create if missing) ───────────────────────────────────
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.reported_content (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            reported_by uuid NOT NULL,
+            report_type text NOT NULL,
+            review_id uuid,
+            post_id uuid,
+            reported_user_id uuid,
+            message_id uuid,
+            news_id uuid,
+            reason text NOT NULL,
+            description text,
+            status text DEFAULT 'pending',
+            reviewed_by uuid,
+            reviewed_at timestamptz,
+            reported_at timestamptz DEFAULT now()
+        )
+    '''))
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.activity_log (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                activity_type text NOT NULL,
-                content_id uuid REFERENCES public.content(id) ON DELETE SET NULL,
-                review_id uuid,
-                post_id uuid,
-                collection_id uuid,
-                news_id uuid,
-                related_user_id uuid,
-                details jsonb,
-                visibility text DEFAULT 'public',
-                created_at timestamptz DEFAULT now()
-            )
-        '''))
+    # ── user_favorite_genres ───────────────────────────────────────────────────
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.user_favorite_genres (
+            user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+            genre_name text NOT NULL,
+            created_at timestamptz DEFAULT now(),
+            PRIMARY KEY (user_id, genre_name)
+        )
+    '''))
 
-        # 6. Collections
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.collections (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                name text NOT NULL,
-                description text,
-                collection_type text DEFAULT 'user',
-                is_default boolean DEFAULT false,
-                is_deletable boolean DEFAULT true,
-                item_count integer DEFAULT 0,
-                is_public boolean DEFAULT true,
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now()
-            )
-        '''))
+    # ── curated_content ────────────────────────────────────────────────────────
+    await add_col("curated_content", "content_type", "TEXT")
+    await add_col("curated_content", "source_id",    "TEXT")
+    await add_col("curated_content", "link_url",     "TEXT")
+    await add_col("curated_content", "content_id",   "UUID")
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.collection_items (
-                collection_id uuid NOT NULL REFERENCES public.collections(id) ON DELETE CASCADE,
-                content_id uuid NOT NULL REFERENCES public.content(id) ON DELETE CASCADE,
-                added_by uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
-                added_at timestamptz DEFAULT now(),
-                PRIMARY KEY (collection_id, content_id)
-            )
-        '''))
+    # ── watch_history ──────────────────────────────────────────────────────────
+    await add_col("watch_history", "watch_type",  "TEXT DEFAULT 'first_watch'")
 
-        # 7. Communications
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.conversations (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                conversation_type text DEFAULT 'direct',
-                direct_pair_key text UNIQUE,
-                title text,
-                last_message_id uuid,
-                last_message_at timestamptz,
-                created_by uuid REFERENCES public.profiles(id),
-                created_at timestamptz DEFAULT now(),
-                updated_at timestamptz DEFAULT now()
-            )
-        '''))
-        
-        # Heal conversations
-        await db.execute(text("ALTER TABLE public.conversations ADD COLUMN IF NOT EXISTS direct_pair_key TEXT UNIQUE"))
-        await db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_direct_pair ON public.conversations(direct_pair_key)"))
+    # ── activity_log ───────────────────────────────────────────────────────────
+    await add_col("activity_log", "news_id",          "UUID")
+    await add_col("activity_log", "details",          "JSONB DEFAULT '{}'")
+    await add_col("activity_log", "related_user_id",  "UUID")
 
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.conversation_members (
-                conversation_id uuid NOT NULL REFERENCES public.conversations(id) ON DELETE CASCADE,
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                joined_at timestamptz DEFAULT now(),
-                PRIMARY KEY (conversation_id, user_id)
-            )
-        '''))
-
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.messages (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                conversation_id uuid NOT NULL REFERENCES public.conversations(id) ON DELETE CASCADE,
-                sender_id uuid NOT NULL REFERENCES public.profiles(id),
-                receiver_id uuid,
-                body text,
-                message_type text DEFAULT 'text',
-                shared_post_id uuid,
-                shared_review_id uuid,
-                shared_content_id uuid,
-                is_read boolean DEFAULT false,
-                read_at timestamptz,
-                sent_at timestamptz DEFAULT now()
-            )
-        '''))
-        
-        # Heal messages
-        await db.execute(text("ALTER TABLE public.messages ADD COLUMN IF NOT EXISTS shared_content_id UUID"))
-
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.notifications (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                actor_id uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
-                related_id uuid,
-                title text,
-                message text NOT NULL,
-                type varchar(50) NOT NULL,
-                is_read boolean DEFAULT false,
-                read_at timestamptz,
-                is_deleted boolean DEFAULT false,
-                last_updated_at timestamptz,
-                created_at timestamptz DEFAULT now()
-            )
-        '''))
-        
-        # Heal notifications (from NotificationService logic)
-        await db.execute(text("ALTER TABLE public.notifications ADD COLUMN IF NOT EXISTS actor_id UUID"))
-        await db.execute(text("ALTER TABLE public.notifications ADD COLUMN IF NOT EXISTS related_id UUID"))
-        await db.execute(text("ALTER TABLE public.notifications ALTER COLUMN title DROP NOT NULL"))
-        await db.execute(text("ALTER TABLE public.notifications ALTER COLUMN type TYPE VARCHAR(50)"))
-
-        # 8. Others
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.news_articles (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                title text NOT NULL,
-                description text,
-                image_url text,
-                source_name text,
-                url text UNIQUE,
-                category text,
-                likes_count integer DEFAULT 0,
-                published_at timestamptz,
-                created_at timestamptz DEFAULT now()
-            )
-        '''))
-
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.search_history (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                query text NOT NULL,
-                content_type_filter text,
-                searched_at timestamptz DEFAULT now()
-            )
-        '''))
-
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.curated_content (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                title text NOT NULL,
-                description text,
-                image_url text,
-                link_url text,
-                content_id uuid REFERENCES public.content(id),
-                category text NOT NULL,
-                priority integer DEFAULT 0,
-                is_active boolean DEFAULT true,
-                created_at timestamptz DEFAULT now()
-            )
-        '''))
-
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.user_favorite_genres (
-                user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-                genre_name text NOT NULL,
-                PRIMARY KEY (user_id, genre_name)
-            )
-        '''))
-
+    try:
         await db.commit()
-        logger.info("Database initialization and healing completed successfully.")
-        
+        logger.info("Database schema healing completed successfully.")
     except Exception as e:
         await db.rollback()
-        logger.error(f"Database initialization failed: {e}")
-        # We don't raise here to allow the app to attempt starting anyway,
-        # but in production, this might lead to downstream errors.
+        logger.error(f"Database schema healing commit failed: {e}")
         raise e
