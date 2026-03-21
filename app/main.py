@@ -126,6 +126,25 @@ app.include_router(social.router,          prefix='/v1/social')
 app.include_router(admin.router,         prefix='/v1/admin')
 app.include_router(media.router,         prefix='/v1/media')
 
+# Backward-compatible aliases (no /v1 prefix)
+# Handles apps built with base URL missing the /v1 path
+app.include_router(auth.router,          prefix='/auth')
+app.include_router(users.router,         prefix='/users')
+app.include_router(reviews.router,       prefix='/reviews')
+app.include_router(posts.router,         prefix='/posts')
+app.include_router(feed.router,          prefix='/feed')
+app.include_router(notifications.router, prefix='/notifications')
+app.include_router(home.router,          prefix='/home')
+app.include_router(discover.router,      prefix='/discover')
+app.include_router(content.router,       prefix='/content')
+app.include_router(news.router,          prefix='/news')
+app.include_router(chat.router,          prefix='/chat')
+app.include_router(collections.router,   prefix='/collections')
+app.include_router(recommendations.router, prefix='/recommendations')
+app.include_router(social.router,        prefix='/social')
+app.include_router(media.router,         prefix='/media')
+
+
 @app.get("/")
 async def root():
     return {

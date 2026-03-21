@@ -148,10 +148,51 @@ class AuthService:
         profile = result.mappings().first()
 
         if not profile:
-            raise HTTPException(
-                status_code=404,
-                detail='Profile not found. Please complete registration.'
-            )
+            # Profile missing in Neon (e.g., after a DB wipe) but user exists in Supabase.
+            # Auto-heal: recreate the profile from Supabase metadata.
+            logger.warning(f"Profile not found for authenticated user {user_id}. Attempting auto-heal.")
+            try:
+                supabase_user = auth_response.user
+                metadata = supabase_user.user_metadata or {}
+                username = metadata.get('username') or email.split('@')[0]
+                display_name = metadata.get('display_name') or username
+                phone = getattr(supabase_user, 'phone', None)
+
+                await self.db.execute(text('''
+                    INSERT INTO profiles (id, username, display_name, email, phone_number, is_verified)
+                    VALUES (:id, :username, :display_name, :email, :phone, true)
+                    ON CONFLICT (id) DO UPDATE SET
+                        display_name = :display_name,
+                        email = :email,
+                        is_verified = true
+                    RETURNING *
+                '''), {
+                    'id': user_id,
+                    'username': username,
+                    'display_name': display_name,
+                    'email': email,
+                    'phone': phone
+                })
+                await self.db.execute(text('''
+                    INSERT INTO user_stats (user_id) VALUES (:id)
+                    ON CONFLICT (user_id) DO NOTHING
+                '''), {'id': user_id})
+                await self.db.commit()
+                logger.info(f"Auto-healed profile for user {user_id}")
+
+                # Re-fetch the rebuilt profile
+                result = await self.db.execute(
+                    text('SELECT * FROM profiles WHERE id = :id'),
+                    {'id': user_id}
+                )
+                profile = result.mappings().first()
+            except Exception as heal_err:
+                await self.db.rollback()
+                logger.error(f"Profile auto-heal failed for {user_id}: {heal_err}")
+                raise HTTPException(
+                    status_code=404,
+                    detail='Profile not found. Please contact support or re-register.'
+                )
 
         return {
             "access_token": access_token,
