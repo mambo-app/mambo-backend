@@ -138,9 +138,10 @@ class AuthService:
         return await self.login(email, password)
 
     async def login(self, email: str, password: str) -> dict:
-        from app.core.supabase import supabase
+        from app.core.supabase import get_supabase_client
+        client = get_supabase_client()
         try:
-            auth_response = supabase.auth.sign_in_with_password({
+            auth_response = client.auth.sign_in_with_password({
                 "email": email,
                 "password": password
             })
@@ -150,6 +151,7 @@ class AuthService:
             user_id = auth_response.user.id
             access_token = auth_response.session.access_token
         except Exception as e:
+            logger.error(f"Login failed for {email}: {e}")
             raise HTTPException(status_code=401, detail="Invalid email or password")
 
         # Now get the profile
@@ -244,19 +246,28 @@ class AuthService:
             raise HTTPException(status_code=400, detail=str(e))
 
     async def refresh_token(self, refresh_token: str) -> dict:
-        from app.core.supabase import supabase
+        import httpx
+        url = f"{settings.supabase_url}/auth/v1/token?grant_type=refresh_token"
+        headers = {
+            "apikey": settings.supabase_anon_key,
+            "Content-Type": "application/json",
+        }
+        data = {"refresh_token": refresh_token}
+        
         try:
-            auth_res = supabase.auth.refresh_session(refresh_token)
-            if not auth_res.user or not auth_res.session:
-                raise Exception("Refresh failed")
-            
-            return {
-                "access_token": auth_res.session.access_token,
-                "refresh_token": auth_res.session.refresh_token,
-                "user": auth_res.user
-            }
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, headers=headers, json=data)
+                if response.status_code != 200:
+                    logger.error(f"Supabase refresh failed: {response.status_code} {response.text}")
+                    raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+                
+                res_data = response.json()
+                return {
+                    "access_token": res_data["access_token"],
+                    "refresh_token": res_data["refresh_token"],
+                }
         except Exception as e:
-            logger.error(f"Token refresh failed: {e}")
+            logger.error(f"Token refresh error: {e}")
             raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
 
     async def _delete_supabase_user(self, user_id: str):

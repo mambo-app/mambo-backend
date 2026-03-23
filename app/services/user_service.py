@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+from typing import List, Dict, Any, Optional
 from uuid import UUID
 from app.core.exceptions import NotFoundError
 from app.services.cache_service import cache, CacheKeys, CacheService
@@ -20,15 +21,18 @@ class UserService:
         storage_path = f"{user_id}/{uuid.uuid4()}.{file_ext}"
         
         try:
-            # Upload to Supabase Storage "avatar" bucket
-            supabase_admin.storage.from_("avatar").upload(
+            # Upload to Supabase Storage "avatars" bucket
+            supabase_admin.storage.from_("avatars").upload(
                 path=storage_path,
                 file=file_data,
-                file_options={"content-type": f"image/{file_ext}"}
+                file_options={
+                    "content-type": f"image/{file_ext}",
+                    "upsert": "true"
+                }
             )
             
             # Get public URL
-            public_url = supabase_admin.storage.from_("avatar").get_public_url(storage_path)
+            public_url = supabase_admin.storage.from_("avatars").get_public_url(storage_path)
             
             # Update profile in Neon
             await self.update_profile(user_id, {"avatar_url": public_url})
@@ -352,8 +356,8 @@ class UserService:
             SELECT 
                 r.id as recommendation_id, r.message, r.sent_at,
                 c.id as content_id, c.title, c.poster_url, c.content_type, c.external_rating,
-                p_sender.username as sender_username, p_sender.display_name as sender_display_name,
-                p_sender.avatar_url as sender_avatar_url
+                p_sender.username as actor_username, p_sender.display_name as actor_display_name,
+                p_sender.avatar_url as actor_avatar_url
             FROM recommendations r
             JOIN recommendation_recipients rr ON rr.recommendation_id = r.id
             JOIN content c ON c.id = r.content_id
@@ -396,10 +400,10 @@ class UserService:
         await self.invalidate_profile_cache(user_id)
         return await repo.get_favorite_genres(user_id)
 
-    async def get_trending_creators(self, limit: int = 10) -> list[dict]:
+    async def get_trending_creators(self, limit: int = 10, viewer_id: Optional[str] = None) -> list[dict]:
         from app.repositories.user_repo import UserRepository
         repo = UserRepository(self.db)
-        return await repo.get_trending_creators(limit)
+        return await repo.get_trending_creators(limit, viewer_id)
 
     async def delete_account(self, user_id: str) -> None:
         from app.repositories.user_repo import UserRepository

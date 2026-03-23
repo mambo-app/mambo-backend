@@ -1,6 +1,7 @@
 from .base import BaseRepository
 from uuid import UUID
 from sqlalchemy import text
+from typing import Optional, Any
 
 class UserRepository(BaseRepository):
 
@@ -161,18 +162,33 @@ class UserRepository(BaseRepository):
         rows = await self.fetch_many('SELECT genre_name FROM user_favorite_genres WHERE user_id = CAST(:user_id AS UUID)', {'user_id': user_id})
         return [row['genre_name'] for row in rows]
 
-    async def get_trending_creators(self, limit: int = 10) -> list[dict]:
-        return await self.fetch_many('''
+    async def get_trending_creators(self, limit: int = 10, viewer_id: Optional[str] = None) -> list[dict]:
+        sql = '''
             SELECT p.id, p.username, p.display_name, p.avatar_url, p.is_verified,
                    COUNT(f.id) as recent_followers
+        '''
+        params: dict[str, Any] = {'limit': limit, 'vid': viewer_id}
+        
+        if viewer_id:
+            sql += ', EXISTS(SELECT 1 FROM follows WHERE follower_id = CAST(:vid AS UUID) AND following_id = p.id) as is_following'
+        
+        sql += '''
             FROM profiles p
             JOIN follows f ON f.following_id = p.id
             WHERE f.created_at > now() - interval '7 days'
             AND p.is_deleted = false
-            GROUP BY p.id
+        '''
+        
+        if viewer_id:
+            sql += ' AND p.id != CAST(:vid AS UUID)'
+            
+        sql += '''
+            GROUP BY p.id, p.username, p.display_name, p.avatar_url, p.is_verified
             ORDER BY recent_followers DESC
             LIMIT :limit
-        ''', {'limit': limit})
+        '''
+        
+        return await self.fetch_many(sql, params)
 
     async def delete_account(self, user_id: str) -> None:
         await self.execute('DELETE FROM profiles WHERE id = :user_id', {'user_id': user_id})

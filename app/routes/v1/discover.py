@@ -47,11 +47,13 @@ async def clear_search_history(
 @router.get('/trending-creators', response_model=Dict[str, Any])
 async def get_trending_creators(
     limit: int = 10,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    user_id: Optional[str] = Depends(get_current_user_id_optional)
 ):
     from app.services.user_service import UserService
     service = UserService(db)
-    items = await service.get_trending_creators(limit)
+    items = await service.get_trending_creators(limit, viewer_id=user_id)
+    return ok({"items": items})
     return ok({"items": items})
 
 @router.get('/{mode}', response_model=Dict[str, Any])

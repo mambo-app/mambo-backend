@@ -154,38 +154,44 @@ class ContentService:
         fetch_tasks = {}
         if needs_popular:
             if content_type == 'movie': fetch_tasks['popular'] = asyncio.gather(self.tmdb_client.get_popular_movies(1), self.tmdb_client.get_indian_movies(1), return_exceptions=True)
-            elif content_type == 'series': fetch_tasks['popular'] = asyncio.gather(self.tmdb_client.get_popular_series(1), self.tmdb_client.get_indian_series(1), return_exceptions=True)
+            elif content_type == 'series': fetch_tasks['popular'] = self.tmdb_client.get_popular_series(1)
             else: fetch_tasks['popular'] = self.mal_client.get_top_anime()
                 
         if needs_top:
             if content_type == 'movie': fetch_tasks['top_rated'] = asyncio.gather(self.tmdb_client.get_top_rated_movies(1), self.tmdb_client.get_indian_movies(1), return_exceptions=True)
-            elif content_type == 'series': fetch_tasks['top_rated'] = asyncio.gather(self.tmdb_client.get_top_rated_series(1), self.tmdb_client.get_indian_series(1), return_exceptions=True)
+            elif content_type == 'series': fetch_tasks['top_rated'] = self.tmdb_client.get_top_rated_series(1)
             else: fetch_tasks['top_rated'] = self.mal_client.get_trending_anime()
 
         if needs_action:
             if content_type != 'anime':
                 func = self.tmdb_client.get_movies_by_genre if content_type == 'movie' else self.tmdb_client.get_series_by_genre
-                func_ind = self.tmdb_client.get_indian_movies_by_genre if content_type == 'movie' else self.tmdb_client.get_indian_series_by_genre
-                fetch_tasks['action'] = asyncio.gather(func(GENRE_ACTION), func_ind(GENRE_ACTION), return_exceptions=True)
+                if content_type == 'movie':
+                    fetch_tasks['action'] = asyncio.gather(func(GENRE_ACTION), self.tmdb_client.get_indian_movies_by_genre(GENRE_ACTION), return_exceptions=True)
+                else:
+                    fetch_tasks['action'] = func(GENRE_ACTION)
             else: fetch_tasks['action'] = self.mal_client.get_anime_by_genre(GENRE_ACTION)
 
         if needs_crime:
             if content_type != 'anime':
                 func = self.tmdb_client.get_movies_by_genre if content_type == 'movie' else self.tmdb_client.get_series_by_genre
-                func_ind = self.tmdb_client.get_indian_movies_by_genre if content_type == 'movie' else self.tmdb_client.get_indian_series_by_genre
-                fetch_tasks['crime'] = asyncio.gather(func(GENRE_CRIME), func_ind(GENRE_CRIME), return_exceptions=True)
+                if content_type == 'movie':
+                    fetch_tasks['crime'] = asyncio.gather(func(GENRE_CRIME), self.tmdb_client.get_indian_movies_by_genre(GENRE_CRIME), return_exceptions=True)
+                else:
+                    fetch_tasks['crime'] = func(GENRE_CRIME)
             else: fetch_tasks['crime'] = self.mal_client.get_anime_by_genre(GENRE_CRIME)
 
         if needs_comedy:
             if content_type != 'anime':
                 func = self.tmdb_client.get_movies_by_genre if content_type == 'movie' else self.tmdb_client.get_series_by_genre
-                func_ind = self.tmdb_client.get_indian_movies_by_genre if content_type == 'movie' else self.tmdb_client.get_indian_series_by_genre
-                fetch_tasks['comedy'] = asyncio.gather(func(GENRE_COMEDY), func_ind(GENRE_COMEDY), return_exceptions=True)
+                if content_type == 'movie':
+                    fetch_tasks['comedy'] = asyncio.gather(func(GENRE_COMEDY), self.tmdb_client.get_indian_movies_by_genre(GENRE_COMEDY), return_exceptions=True)
+                else:
+                    fetch_tasks['comedy'] = func(GENRE_COMEDY)
             else: fetch_tasks['comedy'] = self.mal_client.get_anime_by_genre(GENRE_COMEDY)
 
         if needs_anti:
             if content_type == 'movie': fetch_tasks['anticipated'] = asyncio.gather(self.tmdb_client.get_upcoming_movies(1), self.tmdb_client.get_indian_upcoming_movies(1), return_exceptions=True)
-            elif content_type == 'series': fetch_tasks['anticipated'] = asyncio.gather(self.tmdb_client.get_upcoming_series(1), self.tmdb_client.get_indian_upcoming_series(1), return_exceptions=True)
+            elif content_type == 'series': fetch_tasks['anticipated'] = self.tmdb_client.get_upcoming_series(1)
             else: fetch_tasks['anticipated'] = self.mal_client.get_upcoming_anime()
 
         if fetch_tasks:
@@ -319,27 +325,58 @@ class ContentService:
 
     async def get_content_by_id(self, content_id: str, user_id: Optional[str] = None) -> Optional[ContentResponse]:
         cache_key = CacheKeys.content(content_id)
-        # If user_id is provided, we can't fully use the generic cache for social fields
-        # but we can still cache the base content. For simplicity now, we bypass cache if user_id is provided
         if not user_id:
             cached = await cache.get(cache_key)
             if cached: return ContentResponse.model_validate(cached)
         
         try:
-            res = await self.db.execute(text("SELECT * FROM content WHERE id = :id"), {"id": content_id})
-            row = res.mappings().one_or_none()
+            # 1. Try local DB by UUID
+            is_uuid = False
+            try:
+                UUID(content_id)
+                is_uuid = True
+            except ValueError: pass
+
+            row = None
+            if is_uuid:
+                res = await self.db.execute(text("SELECT * FROM content WHERE id = CAST(:id AS UUID)"), {"id": content_id})
+                row = res.mappings().one_or_none()
+            
+            # 2. Try external IDs if not found by UUID or if content_id is an external ID
+            if not row:
+                res = await self.db.execute(text("SELECT * FROM content WHERE tmdb_id = :id OR mal_id = :id"), {"id": content_id})
+                row = res.mappings().one_or_none()
+
+            # 3. If still not found, it's a 404
             if not row: return None
+            
             d = dict(row)
+            
+            # 4. Check if sync is needed (stale or missing basic info)
+            last_synced = d.get('last_synced_at')
+            stale = not last_synced or (datetime.now() - last_synced.replace(tzinfo=None)).days > 7
+            missing_info = not d.get('synopsis') or not d.get('genres')
+            
+            if (stale or missing_info) and d.get('tmdb_id'):
+                try:
+                    ext_data = await self.tmdb_client.get_movie_details(d['tmdb_id']) if d['content_type'] == 'movie' else await self.tmdb_client.get_series_details(d['tmdb_id'])
+                    if ext_data:
+                        updated = await self._upsert_tmdb_content([ext_data], returning=True)
+                        if updated: d.update(updated[0])
+                except Exception as sync_err:
+                    logger.error(f"Sync failed for {content_id}: {sync_err}")
+
             d['is_anticipated'] = bool(d.get('release_date') and d.get('release_date') > date.today())
             d['avg_star_rating'] = self._get_display_rating(d)
+            d['cast'] = d.get('cast', [])
             
             # Fetch user status if user_id is provided
             if user_id:
                 status_res = await self.db.execute(text('''
                     SELECT is_watched, is_liked, is_dropped, is_interested, watch_count, rating
                     FROM user_content_status
-                    WHERE user_id = :uid AND content_id = :cid
-                '''), {'uid': user_id, 'cid': content_id})
+                    WHERE user_id = CAST(:uid AS UUID) AND content_id = :cid
+                '''), {'uid': user_id, 'cid': d['id']})
                 status = status_res.mappings().one_or_none()
                 if status:
                     d['is_watched'] = status.get('is_watched', False)
@@ -349,13 +386,16 @@ class ContentService:
                     d['watch_count'] = status.get('watch_count', 0)
                     d['user_rating'] = status.get('rating')
 
-            resp = ContentResponse.model_validate(d)
+            try:
+                resp = ContentResponse.model_validate(d)
+            except Exception as ve:
+                logger.error(f"Content validation failed for {content_id}: {ve}\nData: {d}")
+                raise
             if not user_id:
                 await cache.set(cache_key, resp.model_dump(), ttl=CacheService.TTL_CONTENT)
             return resp
         except Exception as e: 
             logger.error(f"Error getting content by id {content_id}: {e}")
-            # Re-raise so the route can return 500 instead of masking as 404
             raise
 
     async def get_content_credits(self, content_id: str) -> List[Dict[str, Any]]:

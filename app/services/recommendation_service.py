@@ -137,8 +137,9 @@ class RecommendationService:
     async def get_received_recommendations(self, user_id: UUID) -> List[Dict]:
         query = text('''
             SELECT r.*, rr.recipient_id, rr.is_viewed, rr.viewed_at,
-                   p.username as sender_username, p.display_name as sender_display_name,
-                   c.title as content_title, c.poster_url as content_poster_url
+                    p.username as actor_username, p.display_name as actor_display_name,
+                    p.avatar_url as actor_avatar_url,
+                    c.title as content_title, c.poster_url as content_poster_url, c.content_type
             FROM recommendations r
             JOIN recommendation_recipients rr ON r.id = rr.recommendation_id
             JOIN profiles p ON r.sender_id = p.id

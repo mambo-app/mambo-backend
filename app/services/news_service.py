@@ -26,6 +26,7 @@ class NewsService:
                 category TEXT DEFAULT 'all',
                 is_active BOOLEAN DEFAULT true,
                 published_at TIMESTAMP WITH TIME ZONE,
+                content TEXT,
                 fetched_at TIMESTAMP WITH TIME ZONE DEFAULT now()
             )
         '''))
@@ -64,6 +65,29 @@ class NewsService:
                 data = resp.json()
                 articles = data.get('articles', [])
                 
+                async def extract_full_text(url: str) -> str:
+                    try:
+                        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as scraper:
+                            s_resp = await scraper.get(url)
+                            if s_resp.status_code == 200:
+                                import re
+                                html = s_resp.text
+                                # Basic heuristic: get text inside <p> tags
+                                p_tags = re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL)
+                                if p_tags:
+                                    clean_text = []
+                                    for p in p_tags:
+                                        # Remove inner tags
+                                        text = re.sub(r'<[^>]+>', '', p)
+                                        text = text.strip()
+                                        if len(text) > 30: # Filter out short noise
+                                            clean_text.append(text)
+                                    if clean_text:
+                                        return "\n\n".join(clean_text)
+                    except:
+                        pass
+                    return ""
+
                 # Insert new articles
                 for article in articles:
                     if article.get('title') and article['title'] != '[Removed]':
@@ -77,13 +101,26 @@ class NewsService:
                                 except ValueError:
                                     pub_date = datetime.now(timezone.utc)
 
+                            # Try to get fuller content
+                            content = article.get('content') or ""
+                            # Remove the "[+xxxx chars]" suffix often added by NewsAPI
+                            import re
+                            content = re.sub(r'\s*\[\+\d+ chars\]\s*$', '', content)
+                            
+                            # If content is short, try scraping
+                            if len(content) < 300:
+                                scraped = await extract_full_text(article['url'])
+                                if len(scraped) > len(content):
+                                    content = scraped
+
                             async with self.db.begin_nested():
                                 await self.db.execute(text('''
-                                    INSERT INTO news_articles (title, description, url, external_url, image_url, source_name, published_at, fetched_at)
-                                    VALUES (:title, :description, :url, :url, :image_url, :source_name, :published_at, now())
+                                    INSERT INTO news_articles (title, description, content, url, external_url, image_url, source_name, published_at, fetched_at)
+                                    VALUES (:title, :description, :content, :url, :url, :image_url, :source_name, :published_at, now())
                                     ON CONFLICT (url) DO UPDATE SET
                                         title = EXCLUDED.title,
                                         description = EXCLUDED.description,
+                                        content = EXCLUDED.content,
                                         external_url = EXCLUDED.external_url,
                                         image_url = EXCLUDED.image_url,
                                         published_at = EXCLUDED.published_at,
@@ -91,6 +128,7 @@ class NewsService:
                                 '''), {
                                     'title': article['title'][:250],
                                     'description': article.get('description'),
+                                    'content': content,
                                     'url': article['url'],
                                     'image_url': article.get('urlToImage'),
                                     'source_name': article['source']['name'] if article.get('source') else None,
@@ -110,7 +148,7 @@ class NewsService:
 
     async def get_latest_news(self, category: str = 'all', limit: int = 20) -> List[Dict[str, Any]]:
         query = '''
-            SELECT id, title, description, url, image_url, source_name, category, published_at
+            SELECT id, title, description, content, url, image_url, source_name, category, published_at
             FROM news_articles
             WHERE is_active = true
         '''

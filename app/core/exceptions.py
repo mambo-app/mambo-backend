@@ -41,7 +41,30 @@ def register_exception_handlers(app: FastAPI):
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception):
         import logging
-        logging.exception('Unhandled exception')
+        import traceback
+        from app.core.database import AsyncSessionLocal
+        from app.repositories.error_repo import ErrorRepository
+        
+        logger = logging.getLogger('mambo.exceptions')
+        stack = traceback.format_exc()
+        logger.error(f"Unhandled exception: {exc}\n{stack}")
+
+        # Log to Database asynchronously
+        try:
+            async with AsyncSessionLocal() as db:
+                repo = ErrorRepository(db)
+                await repo.log_error(
+                    event_name=type(exc).__name__,
+                    message=str(exc),
+                    stack_trace=stack,
+                    request_id=getattr(request.state, 'request_id', None),
+                    path=request.url.path,
+                    method=request.method,
+                    status_code=500
+                )
+        except Exception as log_err:
+            logger.error(f"Failed to persist error log: {log_err}")
+
         return ORJSONResponse(
             status_code=500,
             content={'success': False, 'error': {'code': 'INTERNAL_ERROR', 'message': str(exc)}}

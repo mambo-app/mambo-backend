@@ -92,7 +92,12 @@ class TMDBClient:
             try:
                 resp = await client.get(
                     f"{self.BASE_URL}/tv/popular",
-                    params={"api_key": self.api_key, "language": "en-US", "page": page},
+                    params={
+                        "api_key": self.api_key,
+                        "language": "en-US",
+                        "page": page,
+                        "without_genres": "10766" # No soaps
+                    },
                     timeout=10.0
                 )
                 resp.raise_for_status()
@@ -127,7 +132,12 @@ class TMDBClient:
             try:
                 resp = await client.get(
                     f"{self.BASE_URL}/tv/top_rated",
-                    params={"api_key": self.api_key, "language": "en-US", "page": page},
+                    params={
+                        "api_key": self.api_key, 
+                        "language": "en-US", 
+                        "page": page,
+                        "without_genres": "10766"
+                    },
                     timeout=10.0
                 )
                 resp.raise_for_status()
@@ -173,6 +183,7 @@ class TMDBClient:
                         "api_key": self.api_key,
                         "language": "en-US",
                         "with_genres": str(genre_id),
+                        "without_genres": "10766",
                         "sort_by": "popularity.desc",
                         "page": page,
                     },
@@ -248,11 +259,9 @@ class TMDBClient:
                 logger.error(f"Error fetching upcoming movies: {e}")
                 return []
 
-    # ── INDIAN CONTENT ────────────────────────────────────────────────────────
     # Covers Hindi (hi), Tamil (ta), Telugu (te), Malayalam (ml), Kannada (kn)
-    # USER UPDATE: Prioritize Bollywood (Hindi)
-    _INDIAN_LANGS = "hi"
-    _INDIAN_LANGS_BROAD = "hi|en|te|ta"
+    _INDIAN_LANGS = "hi|ta|te|ml|kn"
+    _INDIAN_LANGS_BROAD = "hi|ta|te|ml|kn|en"
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
     async def get_indian_movies(self, page: int = 1) -> List[Dict[str, Any]]:
@@ -281,18 +290,21 @@ class TMDBClient:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
     async def get_indian_series(self, page: int = 1) -> List[Dict[str, Any]]:
-        """Fetch popular Indian series."""
+        """Fetch popular Indian series on OTT platforms."""
         if not self.api_key:
             return []
         async with httpx.AsyncClient() as client:
             try:
+                # OTT Provider IDs for India: Netflix(8), Amazon(119), Disney+Hotstar(122), SonyLIV(237), Zee5(232)
                 resp = await client.get(
                     f"{self.BASE_URL}/discover/tv",
                     params={
                         "api_key": self.api_key,
                         "language": "en-US",
                         "with_original_language": self._INDIAN_LANGS,
-                        "without_genres": "10766",
+                        "without_genres": "10766", # No Soaps/Serials
+                        "watch_region": "IN",
+                        "with_watch_providers": "8|119|122|237|232",
                         "sort_by": "popularity.desc",
                         "page": page,
                     },
@@ -331,7 +343,7 @@ class TMDBClient:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
     async def get_indian_series_by_genre(self, genre_id: int, page: int = 1) -> List[Dict[str, Any]]:
-        """Fetch Indian TV shows filtered by genre."""
+        """Fetch Indian TV shows filtered by genre on OTT platforms."""
         if not self.api_key:
             return []
         async with httpx.AsyncClient() as client:
@@ -344,6 +356,8 @@ class TMDBClient:
                         "with_original_language": self._INDIAN_LANGS,
                         "with_genres": str(genre_id),
                         "without_genres": "10766",
+                        "watch_region": "IN",
+                        "with_watch_providers": "8|119|122|237|232",
                         "sort_by": "popularity.desc",
                         "page": page,
                     },
@@ -462,7 +476,7 @@ class TMDBClient:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
     async def get_indian_upcoming_series(self, page: int = 1) -> List[Dict[str, Any]]:
-        """Fetch upcoming Indian TV shows."""
+        """Fetch upcoming Indian TV shows on OTT platforms."""
         if not self.api_key: return []
         async with httpx.AsyncClient() as client:
             try:
@@ -474,6 +488,8 @@ class TMDBClient:
                         "language": "en-US",
                         "with_original_language": self._INDIAN_LANGS,
                         "without_genres": "10766",
+                        "watch_region": "IN",
+                        "with_watch_providers": "8|119|122|237|232",
                         "first_air_date.gte": today,
                         "sort_by": "popularity.desc",
                         "page": page,

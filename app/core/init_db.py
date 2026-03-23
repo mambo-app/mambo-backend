@@ -170,6 +170,7 @@ async def init_db(db: AsyncSession):
     await add_col("news_articles", "likes_count",      "INTEGER DEFAULT 0")
     await add_col("news_articles", "comments_count",   "INTEGER DEFAULT 0")
     await add_col("news_articles", "shares_count",     "INTEGER DEFAULT 0")
+    await add_col("news_articles", "content",          "TEXT")
     await add_col("news_articles", "is_active",        "BOOLEAN DEFAULT true")
     await add_col("news_articles", "fetched_at",       "TIMESTAMPTZ DEFAULT now()")
 
