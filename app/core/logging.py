@@ -76,7 +76,7 @@ def configure_logging(level: str = 'INFO') -> None:
     root.addHandler(handler)
 
     # Silence noisy third-party loggers
-    for noisy in ('httpx', 'httpcore'):
+    for noisy in ('httpx', 'httpcore', 'hpack', 'hpack.hpack', 'hpack.table', 'urllib3'):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     
     # Keep uvicorn.access at INFO level unless in production
