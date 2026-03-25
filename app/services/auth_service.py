@@ -104,7 +104,8 @@ class AuthService:
             default_collections = [
                 # name, desc, is_public, is_default, is_pinned, pin_order
                 ('Watchlist', 'My watchlist of movies and shows', False, True, True, 1),
-                ('Dropped', 'Content I stopped watching', False, True, True, 2)
+                ('Dropped', 'Content I stopped watching', False, True, True, 2),
+                ('Watched', 'All content I have watched', False, True, True, 3),
             ]
             for name, desc, is_public, is_def, is_pin, pin_ord in default_collections:
                 await self.db.execute(text('''

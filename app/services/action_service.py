@@ -55,10 +55,13 @@ class ActionService:
                     # We set is_watched to false to clear the visual state immediately
                     await self._revert_watch(user_id, content_id)
                     await self._remove_activity(user_id, ['watched', 'rewatched'], content_id=content_id)
+                    await self._remove_from_collection(user_id, content_id, 'Watched')
                 else:
                     await self._handle_watch(user_id, content_id, req.action)
+                    await self._sync_to_collection(user_id, content_id, 'Watched')
             elif req.action == ActionType.rewatch:
                 await self._handle_watch(user_id, content_id, req.action)
+                await self._sync_to_collection(user_id, content_id, 'Watched')  # idempotent, ON CONFLICT DO NOTHING
             elif req.action == ActionType.drop:
                 if current_status.get('is_dropped'):
                     # REVERT DROP

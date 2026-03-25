@@ -272,6 +272,59 @@ async def init_db(db: AsyncSession):
     await add_col("activity_log", "details",          "JSONB DEFAULT '{}'")
     await add_col("activity_log", "related_user_id",  "UUID")
 
+    # ── Watched collection backfill ────────────────────────────────────────────
+    # For every user that has watched content but is missing a "Watched" collection:
+    # 1. Create the collection
+    # 2. Populate it from user_content_status (is_watched = true)
+    # 3. Fix item_count
+    # This block is 100% idempotent — safe to run on every startup.
+    try:
+        # Step 1: Create missing "Watched" collections for all existing users
+        await db.execute(text('''
+            INSERT INTO collections (user_id, name, description, is_public, collection_type,
+                                    is_default, is_deletable, is_pinned, pin_order)
+            SELECT p.id,
+                   'Watched',
+                   'All content I have watched',
+                   false,
+                   'system',
+                   true,
+                   false,
+                   true,
+                   3
+            FROM profiles p
+            WHERE p.is_deleted = false
+              AND NOT EXISTS (
+                  SELECT 1 FROM collections c
+                  WHERE c.user_id = p.id AND c.name = 'Watched'
+              )
+        '''))
+
+        # Step 2: Backfill collection_items from user_content_status for all "Watched" collections
+        await db.execute(text('''
+            INSERT INTO collection_items (collection_id, content_id, added_by)
+            SELECT c.id, ucs.content_id, ucs.user_id
+            FROM user_content_status ucs
+            JOIN collections c ON c.user_id = ucs.user_id AND c.name = 'Watched'
+            WHERE ucs.is_watched = true
+            ON CONFLICT (collection_id, content_id) DO NOTHING
+        '''))
+
+        # Step 3: Sync item_count to the actual number of items in each "Watched" collection
+        await db.execute(text('''
+            UPDATE collections c
+            SET item_count = (
+                SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id
+            ),
+            updated_at = now()
+            WHERE c.name = 'Watched'
+        '''))
+
+        logger.info("Watched collection backfill completed successfully.")
+    except Exception as e:
+        logger.warning(f"Watched collection backfill warning (non-fatal): {e}")
+        await db.rollback()
+
     try:
         await db.commit()
         logger.info("Database schema healing completed successfully.")
