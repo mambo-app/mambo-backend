@@ -99,9 +99,8 @@ class SocialRepository(BaseRepository):
             OR (sender_id = :receiver_id AND receiver_id = :sender_id)
         ''', {'sender_id': sender_id, 'receiver_id': receiver_id})
 
-    # --- Posts (Discussions) ---
     async def create_post(self, user_id: UUID, data: dict) -> dict:
-        return await self.execute_returning('''
+        post = await self.execute_returning('''
             INSERT INTO posts (user_id, title, body, content_id, media_urls)
             VALUES (:user_id, :title, :body, :content_id, :media_urls)
             RETURNING *
@@ -112,6 +111,9 @@ class SocialRepository(BaseRepository):
             'content_id': data.get('content_id'),
             'media_urls': data.get('media_urls', [])
         })
+        if post:
+            await self.increment_posts_count(user_id)
+        return post
 
     async def get_post(self, post_id: UUID) -> dict | None:
         return await self.fetch_one('''
@@ -279,7 +281,7 @@ class SocialRepository(BaseRepository):
 
     # --- Reviews (Additional) ---
     async def create_review(self, user_id: UUID, content_id: UUID, star_rating: float, text_review: str | None, is_spoiler: bool) -> dict:
-        return await self.execute_returning('''
+        review = await self.execute_returning('''
             INSERT INTO reviews (user_id, content_id, rating, text_review, is_spoiler)
             VALUES (:user_id, :content_id, :rating, :text_review, :is_spoiler)
             RETURNING id, user_id, content_id, rating as star_rating, text_review, is_spoiler as contains_spoiler, created_at
@@ -290,6 +292,17 @@ class SocialRepository(BaseRepository):
             'text_review': text_review,
             'is_spoiler': is_spoiler
         })
+        if review:
+            # Increment both total_reviews and total_posts
+            await self.execute('''
+                INSERT INTO user_stats (user_id, total_reviews, total_posts)
+                VALUES (:uid, 1, 1)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    total_reviews = COALESCE(user_stats.total_reviews, 0) + 1,
+                    total_posts = COALESCE(user_stats.total_posts, 0) + 1,
+                    updated_at = now()
+            ''', {'uid': user_id})
+        return review
 
     async def update_review(self, review_id: UUID, user_id: UUID, data: dict) -> dict | None:
         allowed_fields = {'star_rating': 'rating', 'text_review': 'text_review', 'contains_spoiler': 'is_spoiler'}

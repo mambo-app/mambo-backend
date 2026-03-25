@@ -116,7 +116,7 @@ class AuthService:
                     )
                     VALUES (
                         :uid, :name, :desc, :public, 
-                        'system', :is_def, false,
+                        :type, :is_def, false,
                         :is_pin, :pin_ord
                     )
                     ON CONFLICT DO NOTHING
@@ -125,6 +125,7 @@ class AuthService:
                     'name': name,
                     'desc': desc,
                     'public': is_public,
+                    'type': name.lower(),
                     'is_def': is_def,
                     'is_pin': is_pin,
                     'pin_ord': pin_ord

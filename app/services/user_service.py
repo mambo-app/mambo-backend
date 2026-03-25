@@ -50,7 +50,7 @@ class UserService:
     async def get_by_username(self, username: str, viewer_id: str | None) -> dict:
         result = await self.db.execute(text('''
             SELECT p.*,
-                   us.followers_count, us.following_count, us.friends_count
+                   us.followers_count, us.following_count, us.friends_count, us.total_posts
             FROM profiles p
             LEFT JOIN user_stats us ON us.user_id = p.id
             WHERE p.username = :username
@@ -188,7 +188,7 @@ class UserService:
 
         result = await self.db.execute(text('''
             SELECT p.*, 
-                   us.followers_count, us.following_count, us.friends_count
+                   us.followers_count, us.following_count, us.friends_count, us.total_posts
             FROM profiles p
             LEFT JOIN user_stats us ON us.user_id = p.id
             WHERE p.id = CAST(:id AS UUID)

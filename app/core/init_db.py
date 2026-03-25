@@ -287,7 +287,7 @@ async def init_db(db: AsyncSession):
                    'Watched',
                    'All content I have watched',
                    false,
-                   'system',
+                   'watched',
                    true,
                    false,
                    true,
@@ -298,6 +298,13 @@ async def init_db(db: AsyncSession):
                   SELECT 1 FROM collections c
                   WHERE c.user_id = p.id AND c.name = 'Watched'
               )
+        '''))
+
+        # Step 1b: Fix collection_type for existing default collections
+        await db.execute(text('''
+            UPDATE collections SET collection_type = 'watchlist' WHERE name = 'Watchlist' AND collection_type NOT IN ('watchlist');
+            UPDATE collections SET collection_type = 'dropped' WHERE name = 'Dropped' AND collection_type NOT IN ('dropped');
+            UPDATE collections SET collection_type = 'watched' WHERE name = 'Watched' AND collection_type NOT IN ('watched');
         '''))
 
         # Step 2: Backfill collection_items from user_content_status for all "Watched" collections
@@ -323,6 +330,50 @@ async def init_db(db: AsyncSession):
         logger.info("Watched collection backfill completed successfully.")
     except Exception as e:
         logger.warning(f"Watched collection backfill warning (non-fatal): {e}")
+        # Dont rollback the whole thing if just collection sync failed
+        # await db.rollback() 
+
+    # ── Global Stats Healing ──────────────────────────────────────────────────
+    try:
+        logger.info("Starting global user stats healing (total_reviews, total_posts)...")
+        # Ensure all users have a user_stats entry
+        await db.execute(text('''
+            INSERT INTO user_stats (user_id)
+            SELECT id FROM profiles
+            WHERE is_deleted = false
+            ON CONFLICT (user_id) DO NOTHING
+        '''))
+
+        # Check if 'posts' table exists before trying to query it
+        posts_exist = await db.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'posts')"))
+        posts_exist = posts_exist.scalar()
+
+        # Recalculate total_reviews and total_posts for all users
+        # This update ensures existing reviews are counted as posts
+        sql = '''
+            UPDATE user_stats us
+            SET total_reviews = (
+                SELECT COUNT(*) FROM reviews r 
+                WHERE r.user_id = us.user_id AND r.is_deleted = false
+            ),
+            total_posts = (
+                SELECT COUNT(*) FROM reviews r 
+                WHERE r.user_id = us.user_id AND r.is_deleted = false
+            )
+        '''
+        if posts_exist:
+             sql += ''' + (
+                SELECT COUNT(*) FROM posts p 
+                WHERE p.user_id = us.user_id
+            )'''
+        
+        sql += ", updated_at = now()"
+        
+        res = await db.execute(text(sql))
+        logger.info(f"Global user stats healing completed. Updated {res.rowcount} user_stats rows.")
+        await db.commit() # Commit this part specifically
+    except Exception as e:
+        logger.warning(f"Global stats healing warning (non-fatal): {e}")
         await db.rollback()
 
     try:
