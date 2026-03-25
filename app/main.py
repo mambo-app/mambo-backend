@@ -2,7 +2,7 @@ import sentry_sdk
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import ORJSONResponse, Response
 from contextlib import asynccontextmanager
 
 from app.core.config import settings
@@ -154,9 +154,9 @@ async def root():
         "health": "/health"
     }
 
-@app.get('/health')
+@app.api_route('/health', methods=['GET', 'HEAD'])
 async def health():
-    """Real health check: pings the DB to verify connectivity."""
+    """Health check: pings the DB to verify connectivity. Supports GET and HEAD."""
     from sqlalchemy import text as _text
     from app.core.database import get_db as _get_db
 
@@ -167,12 +167,6 @@ async def health():
             break
     except Exception:
         db_status = 'down'
-
-    return {
-        'status': 'ok' if db_status == 'ok' else 'degraded',
-        'db': db_status,
-        'env': settings.app_env
-    }
 
     return {
         'status': 'ok' if db_status == 'ok' else 'degraded',

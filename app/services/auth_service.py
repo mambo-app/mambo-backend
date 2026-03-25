@@ -249,28 +249,36 @@ class AuthService:
 
     async def refresh_token(self, refresh_token: str) -> dict:
         import httpx
+        from fastapi import HTTPException as _HTTPException
         url = f"{settings.supabase_url}/auth/v1/token?grant_type=refresh_token"
         headers = {
             "apikey": settings.supabase_anon_key,
             "Content-Type": "application/json",
         }
         data = {"refresh_token": refresh_token}
-        
+
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(url, headers=headers, json=data)
                 if response.status_code != 200:
-                    logger.error(f"Supabase refresh failed: {response.status_code} {response.text}")
-                    raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
-                
+                    # Log the real Supabase error body for debugging
+                    logger.error(f"Supabase refresh failed: {response.status_code} — {response.text}")
+                    raise _HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
                 res_data = response.json()
                 return {
                     "access_token": res_data["access_token"],
                     "refresh_token": res_data["refresh_token"],
                 }
+        except _HTTPException:
+            # Re-raise cleanly — don't swallow the 401 in the generic except below
+            raise
+        except httpx.TimeoutException:
+            logger.error("Token refresh timed out calling Supabase (>10s)")
+            raise _HTTPException(status_code=503, detail="Auth service timeout. Please retry.")
         except Exception as e:
-            logger.error(f"Token refresh error: {e}")
-            raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+            logger.error(f"Token refresh unexpected error: {type(e).__name__}: {e}")
+            raise _HTTPException(status_code=401, detail="Invalid or expired refresh token")
 
     async def _delete_supabase_user(self, user_id: str):
         try:
