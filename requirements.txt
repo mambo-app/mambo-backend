@@ -17,3 +17,4 @@ sentry-sdk
 orjson
 upstash-redis
 redis
+beautifulsoup4

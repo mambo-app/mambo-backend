@@ -1,4 +1,5 @@
 import httpx
+import html
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from app.core.config import settings
@@ -65,27 +66,46 @@ class NewsService:
                 data = resp.json()
                 articles = data.get('articles', [])
                 
-                async def extract_full_text(url: str) -> str:
+                async def extract_full_text(article_url: str) -> str:
                     try:
-                        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as scraper:
-                            s_resp = await scraper.get(url)
+                        from bs4 import BeautifulSoup
+                        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as scraper:
+                            s_resp = await scraper.get(article_url, headers={'User-Agent': 'Mozilla/5.0'})
                             if s_resp.status_code == 200:
-                                import re
-                                html = s_resp.text
-                                # Basic heuristic: get text inside <p> tags
-                                p_tags = re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL)
-                                if p_tags:
-                                    clean_text = []
-                                    for p in p_tags:
-                                        # Remove inner tags
-                                        text = re.sub(r'<[^>]+>', '', p)
-                                        text = text.strip()
-                                        if len(text) > 30: # Filter out short noise
-                                            clean_text.append(text)
-                                    if clean_text:
-                                        return "\n\n".join(clean_text)
-                    except:
-                        pass
+                                soup = BeautifulSoup(s_resp.text, 'html.parser')
+
+                                # 1. Aggressively remove all noise-generating tags
+                                for tag in soup.find_all(['script', 'style', 'nav', 'header',
+                                                         'footer', 'aside', 'figure', 'noscript',
+                                                         'iframe', 'form', 'button', 'svg']):
+                                    tag.decompose()
+
+                                # 2. Remove ad/signup blocks by common class/id names
+                                noise_selectors = [
+                                    '[class*="ad"]', '[class*="promo"]', '[class*="banner"]',
+                                    '[class*="subscribe"]', '[class*="newsletter"]',
+                                    '[class*="related"]', '[class*="read-next"]',
+                                    '[class*="sidebar"]', '[class*="menu"]',
+                                    '[class*="breadcrumb"]', '[id*="ad"]',
+                                ]
+                                for selector in noise_selectors:
+                                    for el in soup.select(selector):
+                                        el.decompose()
+
+                                # 3. Extract text from remaining <p> tags
+                                paragraphs = soup.find_all('p')
+                                clean_text = []
+                                for p in paragraphs:
+                                    chunk = p.get_text(separator=' ', strip=True)
+                                    # Decode HTML entities and filter out short noise
+                                    chunk = html.unescape(chunk)
+                                    if len(chunk) > 40:
+                                        clean_text.append(chunk)
+
+                                if clean_text:
+                                    return "\n\n".join(clean_text)
+                    except Exception as scrape_err:
+                        logger.debug(f"Scraping failed for {article_url}: {scrape_err}")
                     return ""
 
                 # Insert new articles
@@ -126,8 +146,8 @@ class NewsService:
                                         published_at = EXCLUDED.published_at,
                                         fetched_at = now()
                                 '''), {
-                                    'title': article['title'][:250],
-                                    'description': article.get('description'),
+                                    'title': html.unescape(article['title'])[:250],
+                                    'description': html.unescape(article.get('description') or ''),
                                     'content': content,
                                     'url': article['url'],
                                     'image_url': article.get('urlToImage'),
