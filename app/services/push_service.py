@@ -42,7 +42,9 @@ class PushService:
         await self.db.execute(text('''
             INSERT INTO push_tokens (user_id, token, platform)
             VALUES (:user_id, :token, :platform)
-            ON CONFLICT (user_id, token) DO UPDATE
-            SET updated_at = now()
+            ON CONFLICT (token) DO UPDATE
+            SET user_id = :user_id, 
+                platform = :platform,
+                updated_at = now()
         '''), {'user_id': user_id, 'token': token, 'platform': platform})
         await self.db.commit()
