@@ -21,22 +21,37 @@ class PushService:
     async def send_to_user(self, user_id: str, title: str, body: str,
                             data: dict = None) -> None:
         try:
+            # Fetch all tokens for the user, most recent first
             result = await self.db.execute(text('''
                 SELECT token FROM push_tokens
                 WHERE user_id = :user_id
+                ORDER BY updated_at DESC
             '''), {'user_id': user_id})
-            row = result.fetchone()
-            if not row:
+            rows = result.fetchall()
+            
+            if not rows:
                 return
 
-            message = messaging.Message(
-                notification=messaging.Notification(title=title, body=body),
-                data=data or {},
-                token=row[0],
-            )
-            messaging.send(message)
+            for row in rows:
+                token = row[0]
+                try:
+                    message = messaging.Message(
+                        notification=messaging.Notification(title=title, body=body),
+                        data=data or {},
+                        token=token,
+                    )
+                    messaging.send(message)
+                except messaging.UnregisteredError:
+                    # Token is no longer valid, delete it
+                    logger.info(f'Deleting stale push token for user {user_id}')
+                    await self.db.execute(text('''
+                        DELETE FROM push_tokens WHERE token = :token
+                    '''), {'token': token})
+                    await self.db.commit()
+                except Exception as e:
+                    logger.error(f'Push failed for user {user_id} on token {token[:10]}...: {e}')
         except Exception as e:
-            logger.error(f'Push failed for user {user_id}: {e}')
+            logger.error(f'PushService.send_to_user failed: {e}')
 
     async def save_token(self, user_id: str, token: str, platform: str) -> None:
         await self.db.execute(text('''
