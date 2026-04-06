@@ -141,8 +141,10 @@ class UserService:
         return profile_dict
 
     async def update_profile(self, user_id: str, data: dict) -> dict:
+        from datetime import datetime, timezone, timedelta, date
+        
         # 1. Define editable fields
-        allowed_fields = {'display_name', 'bio', 'gender', 'birthday', 'avatar_url'}
+        allowed_fields = {'display_name', 'bio', 'gender', 'birthday', 'avatar_url', 'username'}
         updates = {k: v for k, v in data.items() if k in allowed_fields}
 
         if not updates:
@@ -153,15 +155,62 @@ class UserService:
             updates['gender'] = updates['gender'].lower().strip()
             
         if 'birthday' in updates and updates['birthday']:
-            from datetime import date
             try:
                 updates['birthday'] = date.fromisoformat(updates['birthday'])
             except ValueError:
                 from fastapi import HTTPException
                 raise HTTPException(status_code=400, detail="Invalid birthday format. Use YYYY-MM-DD")
 
-        # 3. Build query
-        set_clause = ", ".join([f"{k} = :{k}" for k in updates.keys()])
+        # 3. Username specific logic (Constraint: 15 days, Unique)
+        if 'username' in updates:
+            new_username = updates['username'].strip().lower()
+            current_profile = await self.get_by_id(user_id)
+            
+            if new_username != current_profile['username']:
+                # I. Uniqueness Check
+                existing = await self.db.execute(
+                    text("SELECT 1 FROM profiles WHERE username = :un AND id != :uid"), 
+                    {'un': new_username, 'uid': user_id}
+                )
+                if existing.mappings().first():
+                    raise HTTPException(status_code=400, detail="This username is already taken.")
+
+                # II. 15-Day Restriction Check
+                last_update = current_profile.get('username_updated_at')
+                if last_update:
+                    # If coming from cache, it might be a string
+                    if isinstance(last_update, str):
+                        try:
+                            last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
+                        except ValueError:
+                            pass # Fallback to normal check if it fails
+                    
+                    # Ensure last_update is timezone-aware
+                    if isinstance(last_update, datetime):
+                        if last_update.tzinfo is None:
+                            last_update = last_update.replace(tzinfo=timezone.utc)
+                        
+                        if datetime.now(timezone.utc) - last_update < timedelta(days=15):
+                            raise HTTPException(
+                                status_code=400, 
+                                detail="You can only change your username once every 15 days. Please try again later."
+                            )
+                
+                updates['username'] = new_username
+                updates['username_updated_at'] = datetime.now(timezone.utc)
+            else:
+                # Remove if same to avoid unnecessary update
+                del updates['username']
+
+        if not updates:
+             return await self.get_by_id(user_id)
+
+        # 4. Build query
+        set_params = []
+        for k in updates.keys():
+            set_params.append(f"{k} = :{k}")
+        
+        set_clause = ", ".join(set_params)
         query = f"UPDATE profiles SET {set_clause}, updated_at = now() WHERE id = :id RETURNING *"
         params = {**updates, "id": user_id}
 
@@ -312,19 +361,19 @@ class UserService:
             SELECT 
                 al.activity_type, 
                 al.created_at as watched_at,
-                c.title, 
+                COALESCE(c.title, 'Deleted Content') as title, 
                 c.poster_url, 
-                c.content_type, 
-                c.id as content_id,
-                al.review_id,
-                al.post_id,
+                COALESCE(c.content_type, 'movie') as content_type, 
+                COALESCE(CAST(c.id AS TEXT), '') as content_id,
+                CAST(al.review_id AS TEXT) as review_id,
+                CAST(al.post_id AS TEXT) as post_id,
                 al.details,
                 p.username as actor_username,
                 p.display_name as actor_display_name
             FROM activity_log al
             JOIN profiles p ON p.id = al.user_id
-            LEFT JOIN content c ON c.id = al.content_id
             LEFT JOIN reviews r ON r.id = al.review_id
+            LEFT JOIN content c ON c.id = COALESCE(al.content_id, r.content_id)
             WHERE p.username = :username
             AND (al.visibility = 'public' OR :is_owner = true)
             AND (al.review_id IS NULL OR (r.id IS NOT NULL AND r.is_deleted = false))
@@ -334,37 +383,41 @@ class UserService:
         return [dict(row) for row in result.mappings()]
 
     async def get_liked_content(self, username: str, viewer_id: str | None = None) -> list[dict]:
+        from app.repositories.user_repo import UserRepository
+        repo = UserRepository(self.db)
         profile = await self.get_by_username(username, viewer_id)
         owner_id = str(profile['id'])
         
         if viewer_id != owner_id and profile.get('favourites_visibility') == 'private':
             return []
+            
+        return await repo.get_liked_content(owner_id)
 
-        result = await self.db.execute(text('''
-            SELECT c.id as content_id, c.title, c.poster_url, c.content_type, ucs.updated_at as liked_at
-            FROM user_content_status ucs
-            JOIN profiles p ON p.id = ucs.user_id
-            JOIN content c ON c.id = ucs.content_id
-            WHERE p.username = :username AND ucs.is_liked = true
-            ORDER BY ucs.updated_at DESC
-        '''), {'username': username})
-        return [dict(row) for row in result.mappings()]
+    async def set_top_favorites(self, user_id: str, content_ids: list[str]) -> None:
+        from app.repositories.user_repo import UserRepository
+        repo = UserRepository(self.db)
+        await repo.set_top_favorites(user_id, content_ids)
+
 
     async def get_received_recommendations(self, username: str) -> list[dict]:
         # Helper to bridge to RecommendationService or use direct query for speed
         result = await self.db.execute(text('''
-            SELECT 
-                r.id as recommendation_id, r.message, r.sent_at,
-                c.id as content_id, c.title, c.poster_url, c.content_type, c.external_rating,
-                p_sender.username as actor_username, p_sender.display_name as actor_display_name,
-                p_sender.avatar_url as actor_avatar_url
-            FROM recommendations r
-            JOIN recommendation_recipients rr ON rr.recommendation_id = r.id
-            JOIN content c ON c.id = r.content_id
-            JOIN profiles p_recipient ON p_recipient.id = rr.recipient_id
-            JOIN profiles p_sender ON p_sender.id = r.sender_id
-            WHERE p_recipient.username = :username
-            ORDER BY r.sent_at DESC
+            WITH RankedRecs AS (
+                SELECT 
+                    CAST(r.id AS TEXT) as recommendation_id, r.message, r.sent_at,
+                    CAST(c.id AS TEXT) as content_id, c.title, c.poster_url, c.content_type, c.external_rating,
+                    p_sender.username as actor_username, p_sender.display_name as actor_display_name,
+                    p_sender.avatar_url as actor_avatar_url,
+                    ROW_NUMBER() OVER(PARTITION BY c.id ORDER BY r.sent_at DESC) as rn
+                FROM recommendations r
+                JOIN recommendation_recipients rr ON rr.recommendation_id = r.id
+                JOIN content c ON c.id = r.content_id
+                JOIN profiles p_recipient ON p_recipient.id = rr.recipient_id
+                JOIN profiles p_sender ON p_sender.id = r.sender_id
+                WHERE p_recipient.username = :username
+            )
+            SELECT * FROM RankedRecs WHERE rn = 1
+            ORDER BY sent_at DESC
             LIMIT 20
         '''), {'username': username})
         return [dict(row) for row in result.mappings()]
@@ -394,6 +447,10 @@ class UserService:
         return await repo.update_privacy(user_id, data)
 
     async def update_genres(self, user_id: str, genres: list[str]) -> list[str]:
+        # Enforce 3-genre limit
+        if len(genres) > 3:
+            genres = genres[:3]
+            
         from app.repositories.user_repo import UserRepository
         repo = UserRepository(self.db)
         await repo.set_favorite_genres(user_id, genres)
@@ -470,3 +527,35 @@ class UserService:
         user = await self.get_by_username(username, viewer_id=None)
         repo = SocialRepository(self.db)
         return await repo.get_friends_list(user['id'], limit, offset)
+
+    async def search_users(self, query: str, limit: int = 20, viewer_id: Optional[str] = None) -> list[dict]:
+        """Search for users by username or display name."""
+        from app.repositories.user_repo import UserRepository
+        repo = UserRepository(self.db)
+        
+        # Handle @ prefix for specific username matching
+        if query.startswith('@'):
+            prefix = query[1:].strip()
+            if not prefix:
+                # Return suggested users if only '@' is typed
+                return await repo.get_trending_creators(limit=6, viewer_id=viewer_id)
+            # Use specific username prefix search
+            return await repo.search_by_username_prefix(prefix, limit)
+            
+        # Default full-text search
+        return await repo.search(query, limit, 0)
+
+    async def toggle_person_favorite(self, user_id: str, person_id: str, name: str, profile_url: Optional[str], is_actor: bool) -> bool:
+        from app.repositories.user_repo import UserRepository
+        repo = UserRepository(self.db)
+        return await repo.toggle_person_favorite(user_id, person_id, name, profile_url, is_actor)
+
+    async def get_favorite_persons(self, user_id: str, is_actor: bool) -> list[dict]:
+        from app.repositories.user_repo import UserRepository
+        repo = UserRepository(self.db)
+        return await repo.get_favorite_persons(user_id, is_actor)
+
+    async def is_person_favorite(self, user_id: str, person_id: str) -> bool:
+        from app.repositories.user_repo import UserRepository
+        repo = UserRepository(self.db)
+        return await repo.is_person_favorite(user_id, person_id)
