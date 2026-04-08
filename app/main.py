@@ -1,5 +1,5 @@
-import sentry_sdk
-from sentry_sdk.integrations.fastapi import FastApiIntegration
+# import sentry_sdk
+# from sentry_sdk.integrations.fastapi import FastApiIntegration
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, Response
@@ -108,10 +108,10 @@ app = FastAPI(
 )
 
 # Middleware
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(TimingMiddleware)
-app.add_middleware(RequestIDMiddleware)
-app.add_middleware(RateLimitMiddleware)
+# app.add_middleware(SecurityHeadersMiddleware)
+# app.add_middleware(TimingMiddleware)
+# app.add_middleware(RequestIDMiddleware)
+# app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.origins_list,

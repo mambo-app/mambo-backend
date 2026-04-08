@@ -7,10 +7,10 @@ DATABASE_URL = settings.database_pool_url.replace(
 
 engine = create_async_engine(
     DATABASE_URL,
-    pool_size=5,
-    max_overflow=15,
+    pool_size=15,
+    max_overflow=5,
     pool_timeout=60,
-    pool_pre_ping=True,
+    pool_pre_ping=False, # Disable pre-ping for speed
     pool_recycle=600,
     echo=False,
     # Disable prepared statement caching to prevent stale plan errors
