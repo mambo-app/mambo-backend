@@ -230,7 +230,14 @@ class ContentService:
         if fetch_tasks:
             logger.info(f"Discovery: Fetching {len(fetch_tasks)} tasks for {mode}...")
             keys = list(fetch_tasks.keys())
-            net_res = await asyncio.gather(*[fetch_tasks[k] for k in keys], return_exceptions=True)
+            try:
+                net_res = await asyncio.wait_for(
+                    asyncio.gather(*[fetch_tasks[k] for k in keys], return_exceptions=True),
+                    timeout=3.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Discovery: Network fetch timed out after 3s for {mode}. Serving from DB.")
+                net_res = []
             combined_tmdb = []
             combined_mal = []
             for i, val in enumerate(net_res):
@@ -788,8 +795,8 @@ class ContentService:
             tid = it.get('tmdb_id')
             if tid and tid not in seen: seen.add(tid); u_items.append(it)
         stmt_text = '''
-            INSERT INTO content (tmdb_id, content_type, title, original_title, original_language, synopsis, poster_url, backdrop_url, external_rating, external_rating_source, release_date, genres, is_permanent)
-            VALUES (:tmdb_id, :content_type, :title, :original_title, :original_language, :synopsis, :poster_url, :backdrop_url, :external_rating, :external_rating_source, :release_date, :genres, :is_permanent)
+            INSERT INTO content (tmdb_id, content_type, title, original_title, original_language, synopsis, poster_url, backdrop_url, external_rating, external_rating_source, release_date, genres, is_permanent, last_synced_at)
+            VALUES (:tmdb_id, :content_type, :title, :original_title, :original_language, :synopsis, :poster_url, :backdrop_url, :external_rating, :external_rating_source, :release_date, :genres, :is_permanent, now())
             ON CONFLICT (tmdb_id) DO UPDATE SET 
                 title = EXCLUDED.title, 
                 content_type = EXCLUDED.content_type,

@@ -82,20 +82,20 @@ async def lifespan(app: FastAPI):
                 logger.error(f"Content cleanup scheduler error: {e}")
             await asyncio.sleep(12 * 3600)  # 12 hours
             
-    scheduler_task = asyncio.create_task(run_news_scheduler())
-    cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
-    healing_task = asyncio.create_task(run_global_healing())
+    # scheduler_task = asyncio.create_task(run_news_scheduler())
+    # cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
+    # healing_task = asyncio.create_task(run_global_healing())
     
     yield
     
     # Cleanup
-    try:
-        scheduler_task.cancel()
-        cleanup_task.cancel()
-        healing_task.cancel()
-        await asyncio.gather(scheduler_task, cleanup_task, healing_task, return_exceptions=True)
-    except Exception:
-        pass
+    # try:
+    #     scheduler_task.cancel()
+    #     cleanup_task.cancel()
+    #     healing_task.cancel()
+    #     await asyncio.gather(scheduler_task, cleanup_task, healing_task, return_exceptions=True)
+    # except Exception:
+    #     pass
     await engine.dispose()
 
 app = FastAPI(
