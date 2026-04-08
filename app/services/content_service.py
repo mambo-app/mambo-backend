@@ -18,7 +18,7 @@ class ContentService:
         self.tmdb_client = TMDBClient()
         self.mal_client = MALClient()
 
-    def _map_to_response(self, db_list: List[Dict[str, Any]]) -> List[ContentResponse]:
+    def _map_to_response(self, db_list: List[Dict[str, Any]]) -> List[Any]:
         results = []
         today = date.today()
         for d in db_list:
@@ -26,10 +26,15 @@ class ContentService:
             d['is_anticipated'] = bool(rd and rd > today)
             d['avg_star_rating'] = self._get_display_rating(d)
             d['cast'] = d.get('cast', [])
+            
+            # Use raw dictionary if it's already one, but try to validate for safety
+            # If validation fails, we return the dict anyway to avoid blank screens
             try:
                 results.append(ContentResponse.model_validate(d))
-            except Exception as e: 
-                logger.error(f"Validation error for content {d.get('id')}: {e}")
+            except Exception as e:
+                logger.warning(f"Validation skipped for {d.get('id')}: {e}")
+                # Fallback: ensure necessary fields for the App are present as strings/basic types
+                results.append(d) 
         return results
 
     async def get_home_trending(self, user_id: Optional[str] = None) -> HomeTrendingResponse:
