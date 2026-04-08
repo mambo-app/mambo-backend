@@ -55,13 +55,13 @@ async def lifespan(app: FastAPI):
         pass
 
     async def run_news_scheduler():
-        await asyncio.sleep(120)  # Start 2 minutes after boot
+        await asyncio.sleep(900)
         while True:
             try:
                 logger.info("Starting background news fetch cycle")
                 async with AsyncSessionLocal() as db:
                     service = NewsService(db)
-                    await service.fetch_and_store_news()
+                    await service.fetch_and_store_news(limit=5)
                 logger.info("News fetch cycle completed")
             except Exception as e:
                 logger.error(f"News scheduler error: {e}")

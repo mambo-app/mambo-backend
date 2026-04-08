@@ -57,7 +57,7 @@ class NewsService:
 
         # Fetch news related to movies, anime, series, pop culture
         query = '("movies" OR "anime" OR "tv series" OR "netflix" OR "pop culture")'
-        url = f"https://newsapi.org/v2/everything?q={query}&language=en&sortBy=publishedAt&apiKey={api_key}&pageSize=50"
+        url = f"https://newsapi.org/v2/everything?q={query}&language=en&sortBy=publishedAt&apiKey={api_key}&pageSize=15"
         
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -69,7 +69,7 @@ class NewsService:
                 async def extract_full_text(article_url: str) -> str:
                     try:
                         from bs4 import BeautifulSoup
-                        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as scraper:
+                        async with httpx.AsyncClient(timeout=3.0, follow_redirects=True) as scraper:
                             s_resp = await scraper.get(article_url, headers={'User-Agent': 'Mozilla/5.0'})
                             if s_resp.status_code == 200:
                                 soup = BeautifulSoup(s_resp.text, 'html.parser')
