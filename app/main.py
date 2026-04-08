@@ -38,11 +38,21 @@ async def lifespan(app: FastAPI):
 
     logger = logging.getLogger('mambo.scheduler')
 
-    # Run schema migrations/init once at startup
-    from app.core.init_db import init_db
+    # 1. Run critical schema initialization (MUST be sync)
+    from app.core.init_db import init_db, init_db_data_healing
     async with AsyncSessionLocal() as db:
-        logger.info("Initializing schemas at startup")
+        logger.info("Initializing critical schemas at startup")
         await init_db(db)
+
+    # 2. Define background startup tasks
+    async def run_global_healing():
+        # Wait a bit for server to settle
+        await asyncio.sleep(10)
+        try:
+            async with AsyncSessionLocal() as db:
+                await init_db_data_healing(db)
+        except Exception as e:
+            logger.error(f"Global healing error: {e}")
 
     async def run_news_scheduler():
         while True:
@@ -73,14 +83,17 @@ async def lifespan(app: FastAPI):
             
     scheduler_task = asyncio.create_task(run_news_scheduler())
     cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
+    healing_task = asyncio.create_task(run_global_healing())
     
     yield
     
     # Cleanup
     scheduler_task.cancel()
     cleanup_task.cancel()
+    healing_task.cancel()
+    
     try:
-        await asyncio.gather(scheduler_task, cleanup_task, return_exceptions=True)
+        await asyncio.gather(scheduler_task, cleanup_task, healing_task, return_exceptions=True)
     except asyncio.CancelledError:
         pass
     await engine.dispose()

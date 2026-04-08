@@ -6,11 +6,10 @@ logger = logging.getLogger('mambo.db_init')
 
 async def init_db(db: AsyncSession):
     """
-    Heals the existing Neon database by adding any missing columns to existing tables.
-    Uses ALTER TABLE ... ADD COLUMN IF NOT EXISTS so it's fully safe to run repeatedly.
-    The actual table structure was defined via the Neon dashboard DDL.
+    Critical schema initialization. 
+    Runs synchronously at startup to ensure tables and columns exist.
     """
-    logger.info("Running database schema healing...")
+    logger.info("Running critical database schema initialization...")
 
     try:
         await db.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
@@ -19,18 +18,17 @@ async def init_db(db: AsyncSession):
         logger.warning(f"pgcrypto extension: {e}")
         await db.rollback()
 
-    # Helper to run ALTER TABLE safely
     async def add_col(table: str, col: str, dtype: str):
         try:
             await db.execute(text(
                 f"ALTER TABLE public.{table} ADD COLUMN IF NOT EXISTS {col} {dtype}"
             ))
-            await db.commit() # Commit each column addition independently
+            await db.commit()
         except Exception as e:
             logger.warning(f"add_col {table}.{col}: {e}")
             await db.rollback()
 
-    # ── profiles ───────────────────────────────────────────────────────────────
+    # --- Structure Changes (SCHEMA) ---
     await add_col("profiles", "bio",                         "TEXT")
     await add_col("profiles", "birthday",                    "DATE")
     await add_col("profiles", "gender",                      "TEXT")
@@ -44,7 +42,6 @@ async def init_db(db: AsyncSession):
     await add_col("profiles", "is_deleted",                  "BOOLEAN DEFAULT false")
     await add_col("profiles", "updated_at",                  "TIMESTAMPTZ DEFAULT now()")
 
-    # ── user_stats ─────────────────────────────────────────────────────────────
     await add_col("user_stats", "friends_count",   "INTEGER DEFAULT 0")
     await add_col("user_stats", "followers_count", "INTEGER DEFAULT 0")
     await add_col("user_stats", "following_count", "INTEGER DEFAULT 0")
@@ -53,7 +50,6 @@ async def init_db(db: AsyncSession):
     await add_col("user_stats", "total_posts",     "INTEGER DEFAULT 0")
     await add_col("user_stats", "updated_at",      "TIMESTAMPTZ DEFAULT now()")
 
-    # ── content ────────────────────────────────────────────────────────────────
     await add_col("content", "content_type",           "TEXT NOT NULL DEFAULT 'movie'")
     await add_col("content", "tmdb_id",                "INTEGER")
     await add_col("content", "mal_id",                 "INTEGER")
@@ -74,8 +70,6 @@ async def init_db(db: AsyncSession):
     await add_col("content", "last_synced_at",         "TIMESTAMPTZ DEFAULT now()")
     await add_col("content", "created_at",             "TIMESTAMPTZ DEFAULT now()")
 
-    # ── reviews ────────────────────────────────────────────────────────────────
-    # The actual reviews table may be missing these if created from old schema
     await add_col("reviews", "rating",            "FLOAT")
     await add_col("reviews", "star_rating",       "INTEGER")
     await add_col("reviews", "text_review",       "TEXT")
@@ -91,7 +85,6 @@ async def init_db(db: AsyncSession):
     await add_col("reviews", "deleted_at",        "TIMESTAMPTZ")
     await add_col("reviews", "updated_at",        "TIMESTAMPTZ DEFAULT now()")
 
-    # Unique constraint for upsert
     try:
         await db.execute(text(
             "ALTER TABLE public.reviews ADD CONSTRAINT reviews_user_content_unique "
@@ -99,16 +92,13 @@ async def init_db(db: AsyncSession):
         ))
     except Exception:
         await db.rollback()
-        pass  # Already exists
 
-    # ── posts ──────────────────────────────────────────────────────────────────
     await add_col("posts", "upvotes_count",   "INTEGER DEFAULT 0")
     await add_col("posts", "comments_count",  "INTEGER DEFAULT 0")
     await add_col("posts", "shares_count",    "INTEGER DEFAULT 0")
     await add_col("posts", "saves_count",     "INTEGER DEFAULT 0")
     await add_col("posts", "updated_at",      "TIMESTAMPTZ DEFAULT now()")
 
-    # ── collections ────────────────────────────────────────────────────────────
     await add_col("collections", "collection_type",  "TEXT DEFAULT 'user'")
     await add_col("collections", "is_default",       "BOOLEAN DEFAULT false")
     await add_col("collections", "is_deletable",     "BOOLEAN DEFAULT true")
@@ -118,10 +108,8 @@ async def init_db(db: AsyncSession):
     await add_col("collections", "pin_order",        "INTEGER DEFAULT 0")
     await add_col("collections", "updated_at",       "TIMESTAMPTZ DEFAULT now()")
 
-    # ── collection_items ───────────────────────────────────────────────────────
     await add_col("collection_items", "added_by",  "UUID")
 
-    # ── conversations ──────────────────────────────────────────────────────────
     await add_col("conversations", "direct_pair_key",  "TEXT")
     await add_col("conversations", "title",            "TEXT")
     await add_col("conversations", "last_message_id",  "UUID")
@@ -133,9 +121,7 @@ async def init_db(db: AsyncSession):
         ))
     except Exception:
         await db.rollback()
-        pass
 
-    # ── messages ───────────────────────────────────────────────────────────────
     await add_col("messages", "shared_content_id",      "UUID")
     await add_col("messages", "shared_review_id",       "UUID")
     await add_col("messages", "shared_post_id",         "UUID")
@@ -147,7 +133,6 @@ async def init_db(db: AsyncSession):
     await add_col("messages", "deleted_by_sender",      "BOOLEAN DEFAULT false")
     await add_col("messages", "deleted_by_receiver",    "BOOLEAN DEFAULT false")
 
-    # ── notifications ──────────────────────────────────────────────────────────
     await add_col("notifications", "actor_id",             "UUID")
     await add_col("notifications", "related_id",           "UUID")
     await add_col("notifications", "aggregate_key",        "TEXT")
@@ -161,19 +146,14 @@ async def init_db(db: AsyncSession):
     await add_col("notifications", "related_review_id",    "UUID")
     await add_col("notifications", "related_post_id",      "UUID")
     await add_col("notifications", "related_collection_id","UUID")
-    
-    # ── user_content_status ────────────────────────────────────────────────────
+
     await add_col("user_content_status", "favorite_order", "INTEGER")
-    
+
     try:
-        await db.execute(text(
-            "ALTER TABLE public.notifications ALTER COLUMN title DROP NOT NULL"
-        ))
+        await db.execute(text("ALTER TABLE public.notifications ALTER COLUMN title DROP NOT NULL"))
     except Exception:
         await db.rollback()
-        pass
 
-    # ── news_articles ──────────────────────────────────────────────────────────
     await add_col("news_articles", "external_url",     "TEXT")
     await add_col("news_articles", "is_permanent",     "BOOLEAN DEFAULT false")
     await add_col("news_articles", "likes_count",      "INTEGER DEFAULT 0")
@@ -183,7 +163,6 @@ async def init_db(db: AsyncSession):
     await add_col("news_articles", "is_active",        "BOOLEAN DEFAULT true")
     await add_col("news_articles", "fetched_at",       "TIMESTAMPTZ DEFAULT now()")
 
-    # ── persons ────────────────────────────────────────────────────────────────
     await add_col("persons", "mal_id",          "INTEGER")
     await add_col("persons", "bio",             "TEXT")
     await add_col("persons", "birth_date",      "DATE")
@@ -195,7 +174,6 @@ async def init_db(db: AsyncSession):
     await add_col("persons", "last_synced_at",         "TIMESTAMPTZ DEFAULT now()")
     await add_col("persons", "updated_at",      "TIMESTAMPTZ DEFAULT now()")
 
-    # ── privacy_settings (create if missing) ───────────────────────────────────
     await db.execute(text('''
         CREATE TABLE IF NOT EXISTS public.privacy_settings (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -217,7 +195,6 @@ async def init_db(db: AsyncSession):
         )
     '''))
 
-    # ── push_tokens (create if missing) ────────────────────────────────────────
     await db.execute(text('''
         CREATE TABLE IF NOT EXISTS public.push_tokens (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -229,7 +206,6 @@ async def init_db(db: AsyncSession):
         )
     '''))
 
-    # ── search_history ─────────────────────────────────────────────────────────
     await db.execute(text('''
         CREATE TABLE IF NOT EXISTS public.search_history (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -240,7 +216,6 @@ async def init_db(db: AsyncSession):
         )
     '''))
 
-    # ── reported_content (create if missing) ───────────────────────────────────
     await db.execute(text('''
         CREATE TABLE IF NOT EXISTS public.reported_content (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -259,7 +234,6 @@ async def init_db(db: AsyncSession):
             reported_at timestamptz DEFAULT now()
         )
     '''))
-    await db.commit()
 
     await db.execute(text('''
         CREATE TABLE IF NOT EXISTS public.user_favorite_genres (
@@ -269,58 +243,72 @@ async def init_db(db: AsyncSession):
             PRIMARY KEY (user_id, genre_name)
         )
     '''))
-    await db.commit() # Commit table creations
 
-    # ── curated_content ────────────────────────────────────────────────────────
     await add_col("curated_content", "content_type", "TEXT")
     await add_col("curated_content", "source_id",    "TEXT")
     await add_col("curated_content", "link_url",     "TEXT")
     await add_col("curated_content", "content_id",   "UUID")
 
-    # ── watch_history ──────────────────────────────────────────────────────────
     await add_col("watch_history", "watch_type",  "TEXT DEFAULT 'first_watch'")
 
-    # ── activity_log ───────────────────────────────────────────────────────────
     await add_col("activity_log", "news_id",          "UUID")
     await add_col("activity_log", "details",          "JSONB DEFAULT '{}'")
     await add_col("activity_log", "related_user_id",  "UUID")
 
-    # ── Watched collection backfill ────────────────────────────────────────────
-    # For every user that has watched content but is missing a "Watched" collection:
-    # 1. Create the collection
-    # 2. Populate it from user_content_status (is_watched = true)
-    # 3. Fix item_count
-    # This block is 100% idempotent — safe to run on every startup.
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.error_logs (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            event_name text NOT NULL,
+            message text NOT NULL,
+            stack_trace text,
+            request_id text,
+            path text,
+            method text,
+            status_code integer,
+            metadata jsonb,
+            created_at timestamptz DEFAULT now()
+        )
+    '''))
+
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.landing_posters (
+            id          serial PRIMARY KEY,
+            poster_url  TEXT NOT NULL UNIQUE,
+            tmdb_id     INTEGER,
+            title       TEXT,
+            fetched_at  TIMESTAMPTZ DEFAULT now()
+        )
+    '''))
+
+    await add_col("collections", "pin_order", "INTEGER DEFAULT 0")
+
+    await db.commit()
+    logger.info("Critical schema initialization completed.")
+
+async def init_db_data_healing(db: AsyncSession):
+    """
+    HEAVY tasks (Global re-indexing, backfills).
+    Runs in background AFTER startup to avoid Render timeouts.
+    """
+    logger.info("Starting background database data healing...")
+
+    # 1. Watched collection backfill
     try:
-        # Step 1: Create missing "Watched" collections for all existing users
         await db.execute(text('''
             INSERT INTO collections (user_id, name, description, is_public, collection_type,
                                     is_default, is_deletable, is_pinned, pin_order)
-            SELECT p.id,
-                   'Watched',
-                   'All content I have watched',
-                   false,
-                   'watched',
-                   true,
-                   false,
-                   true,
-                   3
+            SELECT p.id, 'Watched', 'All content I have watched', false, 'watched', true, false, true, 3
             FROM profiles p
             WHERE p.is_deleted = false
               AND NOT EXISTS (
-                  SELECT 1 FROM collections c
-                  WHERE c.user_id = p.id AND c.name = 'Watched'
+                  SELECT 1 FROM collections c WHERE c.user_id = p.id AND c.name = 'Watched'
               )
         '''))
-
-        # Step 1b: Fix collection_type for existing default collections
         await db.execute(text('''
             UPDATE collections SET collection_type = 'watchlist' WHERE name = 'Watchlist' AND collection_type NOT IN ('watchlist');
             UPDATE collections SET collection_type = 'dropped' WHERE name = 'Dropped' AND collection_type NOT IN ('dropped');
             UPDATE collections SET collection_type = 'watched' WHERE name = 'Watched' AND collection_type NOT IN ('watched');
         '''))
-
-        # Step 2: Backfill collection_items from user_content_status for all "Watched" collections
         await db.execute(text('''
             INSERT INTO collection_items (collection_id, content_id, added_by)
             SELECT c.id, ucs.content_id, ucs.user_id
@@ -329,108 +317,42 @@ async def init_db(db: AsyncSession):
             WHERE ucs.is_watched = true
             ON CONFLICT (collection_id, content_id) DO NOTHING
         '''))
-
-        # Step 3: Sync item_count to the actual number of items in each "Watched" collection
         await db.execute(text('''
             UPDATE collections c
-            SET item_count = (
-                SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id
-            ),
-            updated_at = now()
+            SET item_count = (SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id),
+                updated_at = now()
             WHERE c.name = 'Watched'
         '''))
-
-        logger.info("Watched collection backfill completed successfully.")
-    except Exception as e:
-        logger.warning(f"Watched collection backfill warning (non-fatal): {e}")
-        # MUST rollback so subsequent steps don't fail with InFailedSQLTransactionError
-        await db.rollback() 
-    
-    # ── error_logs (create if missing) ─────────────────────────────────────────
-    try:
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.error_logs (
-                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                event_name text NOT NULL,
-                message text NOT NULL,
-                stack_trace text,
-                request_id text,
-                path text,
-                method text,
-                status_code integer,
-                metadata jsonb,
-                created_at timestamptz DEFAULT now()
-            )
-        '''))
+        logger.info("Watched collection backfill completed.")
         await db.commit()
     except Exception as e:
-        logger.warning(f"error_logs table creation warning: {e}")
+        logger.warning(f"Backfill warning: {e}")
         await db.rollback()
 
-    # ── Global Stats Healing ──────────────────────────────────────────────────
+    # 2. Global Stats Healing
     try:
-        logger.info("Starting global user stats healing (total_reviews, total_posts)...")
-        # Ensure all users have a user_stats entry
         await db.execute(text('''
             INSERT INTO user_stats (user_id)
-            SELECT id FROM profiles
-            WHERE is_deleted = false
+            SELECT id FROM profiles WHERE is_deleted = false
             ON CONFLICT (user_id) DO NOTHING
         '''))
+        
+        posts_exist = (await db.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'posts')"))).scalar()
 
-        # Check if 'posts' table exists before trying to query it
-        posts_exist = await db.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'posts')"))
-        posts_exist = posts_exist.scalar()
-
-        # Recalculate total_reviews and total_posts for all users
-        # This update ensures existing reviews are counted as posts
         sql = '''
             UPDATE user_stats us
-            SET total_reviews = (
-                SELECT COUNT(*) FROM reviews r 
-                WHERE r.user_id = us.user_id AND r.is_deleted = false
-            ),
-            total_posts = (
-                SELECT COUNT(*) FROM reviews r 
-                WHERE r.user_id = us.user_id AND r.is_deleted = false
-            )
+            SET total_reviews = (SELECT COUNT(*) FROM reviews r WHERE r.user_id = us.user_id AND r.is_deleted = false),
+                total_posts = (SELECT COUNT(*) FROM reviews r WHERE r.user_id = us.user_id AND r.is_deleted = false)
         '''
         if posts_exist:
-             sql += ''' + (
-                SELECT COUNT(*) FROM posts p 
-                WHERE p.user_id = us.user_id
-            )'''
-        
+             sql += ' + (SELECT COUNT(*) FROM posts p WHERE p.user_id = us.user_id)'
         sql += ", updated_at = now()"
         
-        res = await db.execute(text(sql))
-        logger.info(f"Global user stats healing completed. Updated {res.rowcount} user_stats rows.")
-        await db.commit() # Commit this part specifically
+        await db.execute(text(sql))
+        logger.info("Global user stats healing completed.")
+        await db.commit()
     except Exception as e:
-        logger.warning(f"Global stats healing warning (non-fatal): {e}")
+        logger.warning(f"Stats healing warning: {e}")
         await db.rollback()
 
-    # ── landing_posters (create if missing) ───────────────────────────────────
-    try:
-        await db.execute(text('''
-            CREATE TABLE IF NOT EXISTS public.landing_posters (
-                id          serial PRIMARY KEY,
-                poster_url  TEXT NOT NULL UNIQUE,
-                tmdb_id     INTEGER,
-                title       TEXT,
-                fetched_at  TIMESTAMPTZ DEFAULT now()
-            )
-        '''))
-        await db.commit()
-        logger.info("landing_posters table ensured.")
-    except Exception as e:
-        logger.warning(f"landing_posters table creation warning (non-fatal): {e}")
-        await db.rollback()
-
-    try:
-        await db.commit()
-        logger.info("Database schema healing completed successfully.")
-    except Exception as e:
-        await db.rollback()
-        logger.error(f"Database schema healing commit failed: {e}")
-        raise e
+    logger.info("Background database data healing completed successfully.")
