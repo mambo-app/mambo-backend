@@ -928,9 +928,9 @@ class ContentService:
                 DELETE FROM persons
                 WHERE is_permanent = false
                 AND last_synced_at < now() - interval '{{hours}} hours'
-                AND NOT EXISTS (SELECT 1 FROM user_person_favorites WHERE person_id = CAST(persons.tmdb_id AS TEXT))
-                AND NOT EXISTS (SELECT 1 FROM user_actor_preferences WHERE person_id = CAST(persons.tmdb_id AS TEXT))
-                AND NOT EXISTS (SELECT 1 FROM user_director_preferences WHERE person_id = CAST(persons.tmdb_id AS TEXT))
+                AND NOT EXISTS (SELECT 1 FROM user_person_favorites WHERE person_id = persons.id)
+                AND NOT EXISTS (SELECT 1 FROM user_actor_preferences WHERE person_id = persons.id)
+                AND NOT EXISTS (SELECT 1 FROM user_director_preferences WHERE person_id = persons.id)
             """.replace("{hours}", str(hours)))
             
             result = await self.db.execute(query)
