@@ -17,19 +17,19 @@ from app.middleware.rate_limit import RateLimitMiddleware
 # Initialize structured logging before anything else
 configure_logging(level='DEBUG' if not settings.is_production else 'INFO')
 
-from app.routes.v1 import auth, users #, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media
+from app.routes.v1 import auth, users, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media
 
-# if settings.sentry_dsn:
-#     import sentry_sdk
-#     from sentry_sdk.integrations.fastapi import FastApiIntegration
-#     sentry_sdk.init(
-#         dsn=settings.sentry_dsn,
-#         integrations=[FastApiIntegration(
-#             transaction_style="endpoint",
-#         )],
-#         traces_sample_rate=0.1,
-#         profiles_sample_rate=0.1,
-#     )
+if settings.sentry_dsn:
+    import sentry_sdk
+    from sentry_sdk.integrations.fastapi import FastApiIntegration
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        integrations=[FastApiIntegration(
+            transaction_style="endpoint",
+        )],
+        traces_sample_rate=0.1,
+        profiles_sample_rate=0.1,
+    )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -82,20 +82,20 @@ async def lifespan(app: FastAPI):
                 logger.error(f"Content cleanup scheduler error: {e}")
             await asyncio.sleep(12 * 3600)  # 12 hours
             
-    # scheduler_task = asyncio.create_task(run_news_scheduler())
-    # cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
-    # healing_task = asyncio.create_task(run_global_healing())
+    scheduler_task = asyncio.create_task(run_news_scheduler())
+    cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
+    healing_task = asyncio.create_task(run_global_healing())
     
     yield
     
     # Cleanup
-    # try:
-    #     scheduler_task.cancel()
-    #     cleanup_task.cancel()
-    #     healing_task.cancel()
-    #     await asyncio.gather(scheduler_task, cleanup_task, healing_task, return_exceptions=True)
-    # except Exception:
-    #     pass
+    try:
+        scheduler_task.cancel()
+        cleanup_task.cancel()
+        healing_task.cancel()
+        await asyncio.gather(scheduler_task, cleanup_task, healing_task, return_exceptions=True)
+    except Exception:
+        pass
     await engine.dispose()
 
 app = FastAPI(
@@ -103,14 +103,14 @@ app = FastAPI(
     version='1.0.0',
     docs_url='/docs' if not settings.is_production else None,
     lifespan=lifespan,
-    # default_response_class=ORJSONResponse,
+    default_response_class=ORJSONResponse,
 )
 
 # Middleware
-# app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(TimingMiddleware)
 app.add_middleware(RequestIDMiddleware)
-# app.add_middleware(RateLimitMiddleware)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.origins_list,
@@ -124,38 +124,38 @@ register_exception_handlers(app)
 # Routes
 app.include_router(auth.router,          prefix='/v1/auth')
 app.include_router(users.router,         prefix='/v1/users')
-# app.include_router(reviews.router,       prefix='/v1/reviews')
-# app.include_router(posts.router,         prefix='/v1/posts')
-# app.include_router(feed.router,          prefix='/v1/feed')
-# app.include_router(notifications.router, prefix='/v1/notifications')
-# app.include_router(home.router,          prefix='/v1/home')
-# app.include_router(discover.router,      prefix='/v1/discover')
-# app.include_router(content.router,       prefix='/v1/content')
-# app.include_router(news.router,          prefix='/v1/news')
-# app.include_router(chat.router,          prefix='/v1/chat')
-# app.include_router(reports.router,       prefix='/v1/reports')
-# app.include_router(collections.router,   prefix='/v1/collections')
-# app.include_router(recommendations.router, prefix='/v1/recommendations')
-# app.include_router(social.router,          prefix='/v1/social')
-# app.include_router(admin.router,         prefix='/v1/admin')
-# app.include_router(media.router,         prefix='/v1/media')
+app.include_router(reviews.router,       prefix='/v1/reviews')
+app.include_router(posts.router,         prefix='/v1/posts')
+app.include_router(feed.router,          prefix='/v1/feed')
+app.include_router(notifications.router, prefix='/v1/notifications')
+app.include_router(home.router,          prefix='/v1/home')
+app.include_router(discover.router,      prefix='/v1/discover')
+app.include_router(content.router,       prefix='/v1/content')
+app.include_router(news.router,          prefix='/v1/news')
+app.include_router(chat.router,          prefix='/v1/chat')
+app.include_router(reports.router,       prefix='/v1/reports')
+app.include_router(collections.router,   prefix='/v1/collections')
+app.include_router(recommendations.router, prefix='/v1/recommendations')
+app.include_router(social.router,          prefix='/v1/social')
+app.include_router(admin.router,         prefix='/v1/admin')
+app.include_router(media.router,         prefix='/v1/media')
 
 # Backward-compatible aliases
 app.include_router(auth.router,          prefix='/auth')
 app.include_router(users.router,         prefix='/users')
-# app.include_router(reviews.router,       prefix='/reviews')
-# app.include_router(posts.router,         prefix='/posts')
-# app.include_router(feed.router,          prefix='/feed')
-# app.include_router(notifications.router, prefix='/notifications')
-# app.include_router(home.router,          prefix='/home')
-# app.include_router(discover.router,      prefix='/discover')
-# app.include_router(content.router,       prefix='/content')
-# app.include_router(news.router,          prefix='/news')
-# app.include_router(chat.router,          prefix='/chat')
-# app.include_router(collections.router,   prefix='/collections')
-# app.include_router(recommendations.router, prefix='/recommendations')
-# app.include_router(social.router,        prefix='/social')
-# app.include_router(media.router,         prefix='/media')
+app.include_router(reviews.router,       prefix='/reviews')
+app.include_router(posts.router,         prefix='/posts')
+app.include_router(feed.router,          prefix='/feed')
+app.include_router(notifications.router, prefix='/notifications')
+app.include_router(home.router,          prefix='/home')
+app.include_router(discover.router,      prefix='/discover')
+app.include_router(content.router,       prefix='/content')
+app.include_router(news.router,          prefix='/news')
+app.include_router(chat.router,          prefix='/chat')
+app.include_router(collections.router,   prefix='/collections')
+app.include_router(recommendations.router, prefix='/recommendations')
+app.include_router(social.router,        prefix='/social')
+app.include_router(media.router,         prefix='/media')
 
 
 @app.api_route("/", methods=["GET", "HEAD"])

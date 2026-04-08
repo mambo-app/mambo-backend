@@ -35,18 +35,18 @@ async def get_hot_reviews(
     items = await service.get_hot_reviews(limit)
     return ok({"items": items})
 
-@router.get('/landing-posters', response_model=Dict[str, Any])
-async def get_landing_posters(
-    count: int = 12,
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Returns a stable list of movie poster URLs for the landing screen carousel.
-    First call may be slightly slow (fetches from TMDB + saves to DB).
-    Subsequent calls are fast (served from DB).
-    No auth required.
-    """
-    service = ContentService(db)
-    posters = await service.get_landing_posters(target_count=max(6, min(count, 20)))
-    return ok({"posters": posters})
+# @router.get('/landing-posters', response_model=Dict[str, Any])
+# async def get_landing_posters(
+#     count: int = 12,
+#     db: AsyncSession = Depends(get_db)
+# ):
+#     """
+#     Returns a stable list of movie poster URLs for the landing screen carousel.
+#     First call may be slightly slow (fetches from TMDB + saves to DB).
+#     Subsequent calls are fast (served from DB).
+#     No auth required.
+#     """
+#     service = ContentService(db)
+#     posters = await service.get_landing_posters(target_count=max(6, min(count, 20)))
+#     return ok({"posters": posters})
 
