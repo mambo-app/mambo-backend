@@ -170,21 +170,9 @@ async def root():
 
 @app.api_route('/health', methods=['GET', 'HEAD'])
 async def health():
-    """Health check: pings the DB to verify connectivity. Supports GET and HEAD."""
-    from sqlalchemy import text as _text
-    from app.core.database import get_db as _get_db
-
-    db_status = 'ok'
-    try:
-        async for db in _get_db():
-            # Use a very fast check
-            await db.execute(_text('SELECT 1'))
-            break
-    except Exception as e:
-        db_status = f'down: {str(e)}'
-
+    """Lightweight health check for Render/Cloudflare liveness probes."""
     return {
-        'status': 'ok' if db_status == 'ok' else 'degraded',
-        'db': db_status,
-        'env': settings.app_env
+        'status': 'ok',
+        'env': settings.app_env,
+        'version': '1.0.1' 
     }
