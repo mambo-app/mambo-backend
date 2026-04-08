@@ -17,7 +17,7 @@ from app.middleware.rate_limit import RateLimitMiddleware
 # Initialize structured logging before anything else
 configure_logging(level='DEBUG' if not settings.is_production else 'INFO')
 
-# from app.routes.v1 import auth, users, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media
+from app.routes.v1 import auth, users #, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media
 
 # if settings.sentry_dsn:
 #     import sentry_sdk
@@ -122,8 +122,8 @@ app.add_middleware(
 register_exception_handlers(app)
 
 # Routes
-# app.include_router(auth.router,          prefix='/v1/auth')
-# app.include_router(users.router,         prefix='/v1/users')
+app.include_router(auth.router,          prefix='/v1/auth')
+app.include_router(users.router,         prefix='/v1/users')
 # app.include_router(reviews.router,       prefix='/v1/reviews')
 # app.include_router(posts.router,         prefix='/v1/posts')
 # app.include_router(feed.router,          prefix='/v1/feed')
@@ -141,8 +141,8 @@ register_exception_handlers(app)
 # app.include_router(media.router,         prefix='/v1/media')
 
 # Backward-compatible aliases
-# app.include_router(auth.router,          prefix='/auth')
-# app.include_router(users.router,         prefix='/users')
+app.include_router(auth.router,          prefix='/auth')
+app.include_router(users.router,         prefix='/users')
 # app.include_router(reviews.router,       prefix='/reviews')
 # app.include_router(posts.router,         prefix='/posts')
 # app.include_router(feed.router,          prefix='/feed')
