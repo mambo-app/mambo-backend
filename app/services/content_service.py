@@ -98,6 +98,25 @@ class ContentService:
         return resp
 
     async def get_discover_content(self, mode: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+        from datetime import date
+        from app.services.cache_service import CacheKeys, cache, CacheService
+        
+        # 0. Cache Check
+        cache_key = CacheKeys.discover(mode, user_id if user_id else "guest", date.today().isoformat())
+        cached = await cache.get(cache_key)
+        if cached:
+            # Hydrate user-specific status even on cache hits
+            if user_id:
+                all_items = []
+                for k in ["popular", "top_rated", "anticipated"]:
+                    if k in cached: all_items.extend(cached[k])
+                for row in cached.get("genre_rows", []):
+                    all_items.extend(row.get("items", []))
+                
+                if all_items:
+                    await self._populate_user_status(all_items, user_id)
+            return cached
+
         content_type = {'movie': 'movie', 'series': 'series', 'anime': 'anime'}.get(mode, 'movie')
         
         # 1. Get User Favorite Genres
@@ -299,6 +318,12 @@ class ContentService:
                 
             await self._populate_user_status(flat_items, user_id)
             
+        # 5. Cache the Result
+        try:
+            await cache.set(cache_key, resp, ttl=CacheService.TTL_DISCOVER)
+        except Exception:
+            pass
+
         return resp
 
     async def get_spotlight(self) -> List[Dict[str, Any]]:
@@ -928,7 +953,7 @@ class ContentService:
                 DELETE FROM persons
                 WHERE is_permanent = false
                 AND last_synced_at < now() - interval '{{hours}} hours'
-                AND NOT EXISTS (SELECT 1 FROM user_person_favorites WHERE person_id = persons.id)
+                AND NOT EXISTS (SELECT 1 FROM user_person_favorites WHERE person_id = CAST(persons.tmdb_id AS TEXT))
                 AND NOT EXISTS (SELECT 1 FROM user_actor_preferences WHERE person_id = persons.id)
                 AND NOT EXISTS (SELECT 1 FROM user_director_preferences WHERE person_id = persons.id)
             """.replace("{hours}", str(hours)))

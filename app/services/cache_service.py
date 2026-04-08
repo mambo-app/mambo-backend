@@ -59,11 +59,16 @@ class CacheKeys:
     def search(query_hash: str) -> str:
         return f'search:{query_hash}'
 
+    @staticmethod
+    def discover(mode: str, identifier: str, date_str: str) -> str:
+        return f'discover:{mode}:{identifier}:{date_str}'
+
 class CacheService:
     TTL_CONTENT      = 3600
     TTL_USER_PROFILE = 300
     TTL_USER_STATS   = 300
-    TTL_TRENDING     = 1800
+    TTL_TRENDING     = 86400
+    TTL_DISCOVER     = 86400
     TTL_SEARCH       = 600
 
     @staticmethod
