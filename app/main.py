@@ -55,6 +55,7 @@ async def lifespan(app: FastAPI):
         pass
 
     async def run_news_scheduler():
+        await asyncio.sleep(60)  # Startup delay to pass health checks
         while True:
             try:
                 logger.info("Starting background news fetch cycle")
@@ -67,6 +68,7 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(6 * 3600)  # 6 hours
 
     async def run_content_cleanup_scheduler():
+        await asyncio.sleep(60)  # Startup delay to pass health checks
         from app.services.content_service import ContentService
         while True:
             try:
