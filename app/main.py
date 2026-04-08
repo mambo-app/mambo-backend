@@ -19,13 +19,17 @@ configure_logging(level='DEBUG' if not settings.is_production else 'INFO')
 
 from app.routes.v1 import auth, users, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media
 
-if settings.sentry_dsn:
-    sentry_sdk.init(
-        dsn=settings.sentry_dsn,
-        integrations=[FastApiIntegration()],
-        traces_sample_rate=0.2,
-        environment=settings.app_env,
-    )
+# if settings.sentry_dsn:
+#     import sentry_sdk
+#     from sentry_sdk.integrations.fastapi import FastApiIntegration
+#     sentry_sdk.init(
+#         dsn=settings.sentry_dsn,
+#         integrations=[FastApiIntegration(
+#             transaction_style="endpoint",
+#         )],
+#         traces_sample_rate=0.1,
+#         profiles_sample_rate=0.1,
+#     )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -78,21 +82,20 @@ async def lifespan(app: FastAPI):
                 logger.error(f"Content cleanup scheduler error: {e}")
             await asyncio.sleep(12 * 3600)  # 12 hours
             
-    scheduler_task = asyncio.create_task(run_news_scheduler())
-    cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
-    healing_task = asyncio.create_task(run_global_healing())
+    # scheduler_task = asyncio.create_task(run_news_scheduler())
+    # cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
+    # healing_task = asyncio.create_task(run_global_healing())
     
     yield
     
     # Cleanup
-    scheduler_task.cancel()
-    cleanup_task.cancel()
-    healing_task.cancel()
-    
-    try:
-        await asyncio.gather(scheduler_task, cleanup_task, healing_task, return_exceptions=True)
-    except asyncio.CancelledError:
-        pass
+    # try:
+    #     scheduler_task.cancel()
+    #     cleanup_task.cancel()
+    #     healing_task.cancel()
+    #     await asyncio.gather(scheduler_task, cleanup_task, healing_task, return_exceptions=True)
+    # except Exception:
+    #     pass
     await engine.dispose()
 
 app = FastAPI(
@@ -100,14 +103,14 @@ app = FastAPI(
     version='1.0.0',
     docs_url='/docs' if not settings.is_production else None,
     lifespan=lifespan,
-    default_response_class=ORJSONResponse,
+    # default_response_class=ORJSONResponse,
 )
 
 # Middleware
-app.add_middleware(SecurityHeadersMiddleware)
+# app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(TimingMiddleware)
 app.add_middleware(RequestIDMiddleware)
-app.add_middleware(RateLimitMiddleware)
+# app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.origins_list,
