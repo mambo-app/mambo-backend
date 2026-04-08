@@ -33,7 +33,7 @@ class NewsService:
         '''))
         await self.db.commit()
 
-    async def fetch_and_store_news(self):
+    async def fetch_and_store_news(self, limit: int = 20):
         # Ensure table exists
         await self.init_table()
         
@@ -57,7 +57,7 @@ class NewsService:
 
         # Fetch news related to movies, anime, series, pop culture
         query = '("movies" OR "anime" OR "tv series" OR "netflix" OR "pop culture")'
-        url = f"https://newsapi.org/v2/everything?q={query}&language=en&sortBy=publishedAt&apiKey={api_key}&pageSize=15"
+        url = f"https://newsapi.org/v2/everything?q={query}&language=en&sortBy=publishedAt&apiKey={api_key}&pageSize={limit}"
         
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
