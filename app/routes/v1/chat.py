@@ -79,6 +79,20 @@ async def mark_as_read(
     await service.mark_as_read(user_id, str(conversation_id))
     return ok({"success": True})
 
+@router.delete('/messages/{message_id}', response_model=Dict[str, Any])
+async def delete_message(
+    message_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    service = ChatService(db)
+    try:
+        await service.delete_message(user_id, str(message_id))
+        return ok({"success": True})
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=403, detail=str(e))
+
 @router.get('/{conversation_id}/search', response_model=Dict[str, Any])
 async def search_messages(
     conversation_id: UUID,

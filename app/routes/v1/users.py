@@ -6,16 +6,21 @@ from app.core.dependencies import get_current_user_id, get_current_user_id_optio
 from app.models.common import ok
 
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Any
+from app.models.social import PersonFavoriteRequest, FavoritePersonResponse
 
 router = APIRouter()
 
 class UpdateProfileRequest(BaseModel):
     display_name: Optional[str] = None
+    username: Optional[str] = None
     bio: Optional[str] = None
     gender: Optional[str] = None
     birthday: Optional[str] = None
     avatar_url: Optional[str] = None
+
+class TopFavoritesRequest(BaseModel):
+    content_ids: list[str]
 
 @router.get('/me')
 async def get_current_user_profile(
@@ -46,6 +51,79 @@ async def get_current_user_friends(
     service = SocialService(db)
     friends = await service.get_friends(UUID(user_id))
     return ok({"items": friends})
+
+
+@router.get('/search', response_model=dict[str, Any])
+async def search_users(
+    query: str,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    from app.services.user_service import UserService
+    service = UserService(db)
+    items = await service.search_users(query, limit, viewer_id=user_id)
+    return ok({"items": items})
+
+@router.post('/favorites/person')
+async def toggle_person_favorite(
+    request: PersonFavoriteRequest,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
+    from app.services.user_service import UserService
+    service = UserService(db)
+    is_fav = await service.toggle_person_favorite(
+        user_id,
+        request.person_id,
+        request.name,
+        request.profile_url,
+        request.is_actor
+    )
+    return ok({"is_favorite": is_fav})
+
+@router.get('/favorites/person/check')
+async def check_person_favorite(
+    person_id: str,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
+    from app.services.user_service import UserService
+    service = UserService(db)
+    is_fav = await service.is_person_favorite(user_id, person_id)
+    return ok({"is_favorite": is_fav})
+
+@router.get('/favorites/person')
+async def get_favorite_persons(
+    is_actor: bool = True,
+    username: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
+    from app.services.user_service import UserService
+    service = UserService(db)
+    
+    target_user_id = user_id
+    if username:
+        from app.repositories.user_repo import UserRepository
+        repo = UserRepository(db)
+        user = await repo.get_by_username(username)
+        if user:
+            target_user_id = str(user['id'])
+            
+    items = await service.get_favorite_persons(target_user_id, is_actor)
+    return ok({"items": items})
+
+@router.post('/me/favorites/content')
+async def set_top_favorites(
+    body: TopFavoritesRequest,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    from app.services.user_service import UserService
+    service = UserService(db)
+    await service.set_top_favorites(user_id, body.content_ids)
+    return ok({"message": "Top favorites updated successfully"})
 
 
 @router.post('/{username}/follow')
@@ -339,6 +417,8 @@ async def get_user_following(
     service = UserService(db)
     following = await service.get_following(username, limit, offset)
     return ok({"items": following})
+
+
 
 @router.get('/{username}/friends')
 async def get_user_friends(

@@ -136,16 +136,20 @@ class RecommendationService:
 
     async def get_received_recommendations(self, user_id: UUID) -> List[Dict]:
         query = text('''
-            SELECT r.*, rr.recipient_id, rr.is_viewed, rr.viewed_at,
-                    p.username as actor_username, p.display_name as actor_display_name,
-                    p.avatar_url as actor_avatar_url,
-                    c.title as content_title, c.poster_url as content_poster_url, c.content_type
-            FROM recommendations r
-            JOIN recommendation_recipients rr ON r.id = rr.recommendation_id
-            JOIN profiles p ON r.sender_id = p.id
-            JOIN content c ON r.content_id = c.id
-            WHERE rr.recipient_id = :uid
-            ORDER BY r.sent_at DESC
+            WITH RankedRecs AS (
+                SELECT r.*, rr.recipient_id, rr.is_viewed, rr.viewed_at,
+                        p.username as actor_username, p.display_name as actor_display_name,
+                        p.avatar_url as actor_avatar_url,
+                        c.title as content_title, c.poster_url as content_poster_url, c.content_type,
+                        ROW_NUMBER() OVER(PARTITION BY c.id ORDER BY r.sent_at DESC) as rn
+                FROM recommendations r
+                JOIN recommendation_recipients rr ON r.id = rr.recommendation_id
+                JOIN profiles p ON r.sender_id = p.id
+                JOIN content c ON r.content_id = c.id
+                WHERE rr.recipient_id = :uid
+            )
+            SELECT * FROM RankedRecs WHERE rn = 1
+            ORDER BY sent_at DESC
         ''')
         res = await self.db.execute(query, {'uid': user_id})
         return [dict(r) for r in res.mappings()]

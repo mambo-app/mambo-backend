@@ -18,6 +18,7 @@ class ContentResponse(BaseModel):
     content_type: str
     title: str
     synopsis: Optional[str] = None
+    original_language: Optional[str] = None
     poster_url: Optional[str] = None
     backdrop_url: Optional[str] = None
     genres: List[str] = []

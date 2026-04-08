@@ -25,6 +25,7 @@ async def init_db(db: AsyncSession):
             await db.execute(text(
                 f"ALTER TABLE public.{table} ADD COLUMN IF NOT EXISTS {col} {dtype}"
             ))
+            await db.commit() # Commit each column addition independently
         except Exception as e:
             logger.warning(f"add_col {table}.{col}: {e}")
             await db.rollback()
@@ -57,6 +58,7 @@ async def init_db(db: AsyncSession):
     await add_col("content", "tmdb_id",                "INTEGER")
     await add_col("content", "mal_id",                 "INTEGER")
     await add_col("content", "original_title",         "TEXT")
+    await add_col("content", "original_language",      "TEXT")
     await add_col("content", "synopsis",               "TEXT")
     await add_col("content", "poster_url",             "TEXT")
     await add_col("content", "backdrop_url",           "TEXT")
@@ -96,6 +98,7 @@ async def init_db(db: AsyncSession):
             "UNIQUE (user_id, content_id)"
         ))
     except Exception:
+        await db.rollback()
         pass  # Already exists
 
     # ── posts ──────────────────────────────────────────────────────────────────
@@ -129,6 +132,7 @@ async def init_db(db: AsyncSession):
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_direct_pair ON public.conversations(direct_pair_key)"
         ))
     except Exception:
+        await db.rollback()
         pass
 
     # ── messages ───────────────────────────────────────────────────────────────
@@ -157,11 +161,16 @@ async def init_db(db: AsyncSession):
     await add_col("notifications", "related_review_id",    "UUID")
     await add_col("notifications", "related_post_id",      "UUID")
     await add_col("notifications", "related_collection_id","UUID")
+    
+    # ── user_content_status ────────────────────────────────────────────────────
+    await add_col("user_content_status", "favorite_order", "INTEGER")
+    
     try:
         await db.execute(text(
             "ALTER TABLE public.notifications ALTER COLUMN title DROP NOT NULL"
         ))
     except Exception:
+        await db.rollback()
         pass
 
     # ── news_articles ──────────────────────────────────────────────────────────
@@ -181,6 +190,9 @@ async def init_db(db: AsyncSession):
     await add_col("persons", "death_date",      "DATE")
     await add_col("persons", "place_of_birth",  "VARCHAR")
     await add_col("persons", "known_for",       "TEXT")
+    await add_col("persons", "known_for_department", "TEXT")
+    await add_col("persons", "is_permanent",           "BOOLEAN DEFAULT false")
+    await add_col("persons", "last_synced_at",         "TIMESTAMPTZ DEFAULT now()")
     await add_col("persons", "updated_at",      "TIMESTAMPTZ DEFAULT now()")
 
     # ── privacy_settings (create if missing) ───────────────────────────────────
@@ -247,8 +259,8 @@ async def init_db(db: AsyncSession):
             reported_at timestamptz DEFAULT now()
         )
     '''))
+    await db.commit()
 
-    # ── user_favorite_genres ───────────────────────────────────────────────────
     await db.execute(text('''
         CREATE TABLE IF NOT EXISTS public.user_favorite_genres (
             user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
@@ -257,6 +269,7 @@ async def init_db(db: AsyncSession):
             PRIMARY KEY (user_id, genre_name)
         )
     '''))
+    await db.commit() # Commit table creations
 
     # ── curated_content ────────────────────────────────────────────────────────
     await add_col("curated_content", "content_type", "TEXT")
@@ -330,8 +343,29 @@ async def init_db(db: AsyncSession):
         logger.info("Watched collection backfill completed successfully.")
     except Exception as e:
         logger.warning(f"Watched collection backfill warning (non-fatal): {e}")
-        # Dont rollback the whole thing if just collection sync failed
-        # await db.rollback() 
+        # MUST rollback so subsequent steps don't fail with InFailedSQLTransactionError
+        await db.rollback() 
+    
+    # ── error_logs (create if missing) ─────────────────────────────────────────
+    try:
+        await db.execute(text('''
+            CREATE TABLE IF NOT EXISTS public.error_logs (
+                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                event_name text NOT NULL,
+                message text NOT NULL,
+                stack_trace text,
+                request_id text,
+                path text,
+                method text,
+                status_code integer,
+                metadata jsonb,
+                created_at timestamptz DEFAULT now()
+            )
+        '''))
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"error_logs table creation warning: {e}")
+        await db.rollback()
 
     # ── Global Stats Healing ──────────────────────────────────────────────────
     try:
@@ -374,6 +408,23 @@ async def init_db(db: AsyncSession):
         await db.commit() # Commit this part specifically
     except Exception as e:
         logger.warning(f"Global stats healing warning (non-fatal): {e}")
+        await db.rollback()
+
+    # ── landing_posters (create if missing) ───────────────────────────────────
+    try:
+        await db.execute(text('''
+            CREATE TABLE IF NOT EXISTS public.landing_posters (
+                id          serial PRIMARY KEY,
+                poster_url  TEXT NOT NULL UNIQUE,
+                tmdb_id     INTEGER,
+                title       TEXT,
+                fetched_at  TIMESTAMPTZ DEFAULT now()
+            )
+        '''))
+        await db.commit()
+        logger.info("landing_posters table ensured.")
+    except Exception as e:
+        logger.warning(f"landing_posters table creation warning (non-fatal): {e}")
         await db.rollback()
 
     try:

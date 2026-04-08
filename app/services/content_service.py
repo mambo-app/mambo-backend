@@ -99,9 +99,34 @@ class ContentService:
 
     async def get_discover_content(self, mode: str, user_id: Optional[str] = None) -> Dict[str, Any]:
         content_type = {'movie': 'movie', 'series': 'series', 'anime': 'anime'}.get(mode, 'movie')
-        GENRE_ACTION = (28 if content_type == 'movie' else 10759) if mode != 'anime' else 1
-        GENRE_CRIME = 80 if mode != 'anime' else 7
-        GENRE_COMEDY = 35 if mode != 'anime' else 4
+        
+        # 1. Get User Favorite Genres
+        target_genres = ['Action', 'Crime', 'Comedy'] # Default
+        if user_id:
+            from app.repositories.user_repo import UserRepository
+            repo = UserRepository(self.db)
+            user_favs = await repo.get_favorite_genres(user_id)
+            if user_favs:
+                target_genres = user_favs[:3]
+
+        # Genre mapping for TMDB/MAL
+        # (Simplified mapping, ideally this would be a more robust lookup table)
+        genre_ids = {
+            'Action': (28 if mode == 'movie' else 10759) if mode != 'anime' else 1,
+            'Crime': 80 if mode != 'anime' else 7,
+            'Comedy': 35 if mode != 'anime' else 4,
+            'Drama': 18 if mode != 'anime' else 8,
+            'Sci-Fi': (878 if mode == 'movie' else 10765) if mode != 'anime' else 24,
+            'Horror': (27 if mode == 'movie' else 9648) if mode != 'anime' else 14, # Fallback to Mystery for TV
+            'Romance': 10749 if mode != 'anime' else 22,
+            'Thriller': (53 if mode == 'movie' else 9648) if mode != 'anime' else 41, # Fallback to Mystery for TV
+            'Animation': 16 if mode != 'anime' else 1,
+            'Fantasy': (14 if mode == 'movie' else 10765) if mode != 'anime' else 10, # 10765 is Sci-Fi & Fantasy
+            'Documentary': 99 if mode != 'anime' else 1,
+            'Adventure': (12 if mode == 'movie' else 10759) if mode != 'anime' else 2,
+            'Mystery': 9648 if mode != 'anime' else 7,
+            'Family': 10751 if mode != 'anime' else 1,
+        }
 
         async def _db_fresh_count(genre_filter: Optional[str] = None, min_rating: Optional[float] = None, future_only: bool = False) -> int:
             sql = 'SELECT COUNT(*) FROM content WHERE content_type = :ct'
@@ -141,95 +166,137 @@ class ContentService:
             res = await self.db.execute(text(sql), params)
             return [dict(row) for row in res.mappings()]
 
-        CACHE_MIN = 8
-        ANT_MIN = 5
-        # Align thresholds: Use 7.2 here since the final query uses 7.2
-        needs_popular = await _db_fresh_count() < CACHE_MIN
-        needs_top     = await _db_fresh_count(min_rating=7.2) < CACHE_MIN
-        needs_action  = await _db_fresh_count(genre_filter='Action') < CACHE_MIN
-        needs_crime   = await _db_fresh_count(genre_filter='Crime') < CACHE_MIN
-        needs_comedy  = await _db_fresh_count(genre_filter='Comedy') < CACHE_MIN
-        needs_anti    = await _db_fresh_count(future_only=True) < ANT_MIN
+        CACHE_MIN = 100
+        ANT_MIN = 50
         
+        # 2. Check and Prepare Fetch Tasks
         fetch_tasks = {}
-        if needs_popular:
-            if content_type == 'movie': fetch_tasks['popular'] = asyncio.gather(self.tmdb_client.get_popular_movies(1), self.tmdb_client.get_indian_movies(1), return_exceptions=True)
+        
+        # Standard rows
+        if await _db_fresh_count() < CACHE_MIN:
+            if content_type == 'movie': 
+                fetch_tasks['popular'] = asyncio.gather(
+                    self.tmdb_client.get_popular_movies(1), 
+                    self.tmdb_client.get_indian_movies(1),
+                    self.tmdb_client.get_indian_now_playing(1),
+                    return_exceptions=True
+                )
             elif content_type == 'series': fetch_tasks['popular'] = self.tmdb_client.get_popular_series(1)
             else: fetch_tasks['popular'] = self.mal_client.get_top_anime()
                 
-        if needs_top:
+        if await _db_fresh_count(min_rating=7.2) < CACHE_MIN:
             if content_type == 'movie': fetch_tasks['top_rated'] = asyncio.gather(self.tmdb_client.get_top_rated_movies(1), self.tmdb_client.get_indian_movies(1), return_exceptions=True)
             elif content_type == 'series': fetch_tasks['top_rated'] = self.tmdb_client.get_top_rated_series(1)
             else: fetch_tasks['top_rated'] = self.mal_client.get_trending_anime()
-
-        if needs_action:
-            if content_type != 'anime':
-                func = self.tmdb_client.get_movies_by_genre if content_type == 'movie' else self.tmdb_client.get_series_by_genre
-                if content_type == 'movie':
-                    fetch_tasks['action'] = asyncio.gather(func(GENRE_ACTION), self.tmdb_client.get_indian_movies_by_genre(GENRE_ACTION), return_exceptions=True)
-                else:
-                    fetch_tasks['action'] = func(GENRE_ACTION)
-            else: fetch_tasks['action'] = self.mal_client.get_anime_by_genre(GENRE_ACTION)
-
-        if needs_crime:
-            if content_type != 'anime':
-                func = self.tmdb_client.get_movies_by_genre if content_type == 'movie' else self.tmdb_client.get_series_by_genre
-                if content_type == 'movie':
-                    fetch_tasks['crime'] = asyncio.gather(func(GENRE_CRIME), self.tmdb_client.get_indian_movies_by_genre(GENRE_CRIME), return_exceptions=True)
-                else:
-                    fetch_tasks['crime'] = func(GENRE_CRIME)
-            else: fetch_tasks['crime'] = self.mal_client.get_anime_by_genre(GENRE_CRIME)
-
-        if needs_comedy:
-            if content_type != 'anime':
-                func = self.tmdb_client.get_movies_by_genre if content_type == 'movie' else self.tmdb_client.get_series_by_genre
-                if content_type == 'movie':
-                    fetch_tasks['comedy'] = asyncio.gather(func(GENRE_COMEDY), self.tmdb_client.get_indian_movies_by_genre(GENRE_COMEDY), return_exceptions=True)
-                else:
-                    fetch_tasks['comedy'] = func(GENRE_COMEDY)
-            else: fetch_tasks['comedy'] = self.mal_client.get_anime_by_genre(GENRE_COMEDY)
-
-        if needs_anti:
+ 
+        if await _db_fresh_count(future_only=True) < ANT_MIN:
             if content_type == 'movie': fetch_tasks['anticipated'] = asyncio.gather(self.tmdb_client.get_upcoming_movies(1), self.tmdb_client.get_indian_upcoming_movies(1), return_exceptions=True)
             elif content_type == 'series': fetch_tasks['anticipated'] = self.tmdb_client.get_upcoming_series(1)
             else: fetch_tasks['anticipated'] = self.mal_client.get_upcoming_anime()
 
+        # Genre-specific rows
+        for genre in target_genres:
+            if await _db_fresh_count(genre_filter=genre) < CACHE_MIN:
+                genre_id = genre_ids.get(genre, 1) # Fallback to 1 (General/Action)
+                if content_type != 'anime':
+                    func = self.tmdb_client.get_movies_by_genre if content_type == 'movie' else self.tmdb_client.get_series_by_genre
+                    if content_type == 'movie':
+                        fetch_tasks[f'genre_{genre}'] = asyncio.gather(func(genre_id), self.tmdb_client.get_indian_movies_by_genre(genre_id), return_exceptions=True)
+                    else:
+                        fetch_tasks[f'genre_{genre}'] = func(genre_id)
+                else: 
+                    fetch_tasks[f'genre_{genre}'] = self.mal_client.get_anime_by_genre(genre_id)
+ 
+        # 3. Execute Fetch Tasks
         if fetch_tasks:
+            logger.info(f"Discovery: Fetching {len(fetch_tasks)} tasks for {mode}...")
             keys = list(fetch_tasks.keys())
             net_res = await asyncio.gather(*[fetch_tasks[k] for k in keys], return_exceptions=True)
             combined_tmdb = []
             combined_mal = []
             for i, val in enumerate(net_res):
-                if isinstance(val, Exception): continue
+                if isinstance(val, Exception):
+                    logger.error(f"Discovery fetch failed for {keys[i]}: {val}")
+                    continue
                 flat = []
                 if isinstance(val, (list, tuple)) and any(isinstance(x, list) for x in val):
                     for sub in val:
                         if isinstance(sub, list): flat.extend(sub)
                 elif isinstance(val, list): flat = val
+                
                 if mode == 'anime': combined_mal.extend(flat)
                 else: combined_tmdb.extend(flat)
-            if combined_tmdb: await self._upsert_tmdb_content(combined_tmdb, returning=False)
-            if combined_mal: await self._upsert_mal_content(combined_mal, returning=False)
+            
+            # Upsert as non-permanent (subject to 24h cleanup)
+            if combined_tmdb: 
+                logger.info(f"Discovery: Upserting {len(combined_tmdb)} items from TMDB")
+                await self._upsert_tmdb_content(combined_tmdb, returning=False, is_permanent=False)
+            if combined_mal: 
+                logger.info(f"Discovery: Upserting {len(combined_mal)} items from MAL")
+                await self._upsert_mal_content(combined_mal, returning=False, is_permanent=False)
+ 
+        # 4. Final DB Queries for Response
+        pop_db = await _db_query(limit=50, sort='recent')
+        top_db = await _db_query(limit=20, min_rating=7.2)
+        ant_db = await _db_query(limit=50, future_only=True)
 
-        pop_db = await _db_query(limit=10, sort='recent')
-        top_db = await _db_query(limit=10, min_rating=7.2)
-        act_db = await _db_query(limit=10, genre_filter='Action')
-        cri_db = await _db_query(limit=10, genre_filter='Crime')
-        com_db = await _db_query(limit=10, genre_filter='Comedy')
-        ant_db = await _db_query(limit=5, future_only=True)
+        if content_type == 'movie':
+            # Priority: Recent + Popular mixing
+            hollywood = [item for item in pop_db if item.get('original_language') == 'en'][:15]
+            bollywood = [item for item in pop_db if item.get('original_language') in ['hi', 'ta', 'te', 'ml', 'kn']][:15]
+            
+            mixed = []
+            max_len = max(len(hollywood), len(bollywood))
+            for i in range(max_len):
+                if i < len(hollywood): mixed.append(hollywood[i])
+                if i < len(bollywood): mixed.append(bollywood[i])
+                
+            if len(mixed) < 12:
+                for item in pop_db:
+                    if item not in mixed:
+                        mixed.append(item); 
+                        if len(mixed) >= 12: break
+            pop_db = mixed[:24]
+        else:
+            pop_db = pop_db[:12]
+
+        genre_rows = []
+        for genre in target_genres:
+            # For Series, we might need to search by the mapped names
+            search_genres = [genre]
+            if content_type == 'series':
+                if genre == 'Horror': search_genres.append('Mystery')
+                elif genre == 'Thriller': search_genres.append('Mystery')
+                elif genre == 'Sci-Fi': search_genres.append('Sci-Fi')
+                elif genre == 'Fantasy': search_genres.append('Sci-Fi')
+                elif genre == 'Action': search_genres.append('Action')
+                elif genre == 'Adventure': search_genres.append('Action')
+
+            genre_items = []
+            for sg in search_genres:
+                found = await _db_query(limit=10, genre_filter=sg)
+                genre_items.extend([i for i in found if i not in genre_items])
+                if len(genre_items) >= 10: break
+            
+            genre_rows.append({
+                "genre": genre,
+                "items": self._map_to_response(genre_items[:10])
+            })
 
         resp = {
             "popular": self._map_to_response(pop_db),
             "top_rated": self._map_to_response(top_db),
-            "action": self._map_to_response(act_db),
-            "crime": self._map_to_response(cri_db),
-            "comedy": self._map_to_response(com_db),
             "anticipated": self._map_to_response(ant_db),
+            "genre_rows": genre_rows
         }
         
         if user_id:
-            all_lists = [resp[k] for k in resp]
-            flat_items = [item for sublist in all_lists for item in sublist]
+            all_lists = [resp[k] for k in ["popular", "top_rated", "anticipated"]]
+            # Also add items from genre rows correctly
+            flat_items = [item for sublist in all_lists for item in (sublist if isinstance(sublist, list) else [])]
+            for row in genre_rows:
+                flat_items.extend(row["items"])
+                
             await self._populate_user_status(flat_items, user_id)
             
         return resp
@@ -314,6 +381,82 @@ class ContentService:
         else: res = await self.db.execute(text('DELETE FROM search_history WHERE user_id = :uid'), {'uid': user_id})
         await self.db.commit()
         return res.rowcount
+
+    async def search_people(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Search for people across local DB and TMDB fallback, filtered by Acting/Directing."""
+        # 1. Local Search with Filtering
+        q = f"%{query}%"
+        res = await self.db.execute(text('''
+            SELECT id, tmdb_id, name, profile_image_url as profile_url, known_for_department 
+            FROM persons 
+            WHERE name ILIKE :q 
+            AND known_for_department IN ('Acting', 'Directing')
+            ORDER BY last_synced_at DESC
+            LIMIT :limit
+        '''), {'q': q, 'limit': limit})
+        rows = [dict(r) for r in res.mappings()]
+        
+        # 2. TMDB Fallback if few results
+        if len(rows) < 5:
+            tmdb_results = await self.tmdb_client.search_people(query)
+            if tmdb_results:
+                # Filter TMDB results before upsert
+                filtered_tmdb = [
+                    p for p in tmdb_results 
+                    if p.get('known_for_department') in ('Acting', 'Directing')
+                ]
+                
+                # Upsert findings to local DB
+                for p in filtered_tmdb:
+                    await self._upsert_person(p)
+                await self.db.commit()
+                
+                # Re-query local for unified response
+                res = await self.db.execute(text('''
+                    SELECT id, tmdb_id, name, profile_image_url as profile_url, known_for_department 
+                    FROM persons 
+                    WHERE name ILIKE :q 
+                    AND known_for_department IN ('Acting', 'Directing')
+                    ORDER BY last_synced_at DESC
+                    LIMIT :limit
+                '''), {'q': q, 'limit': limit})
+                rows = [dict(r) for r in res.mappings()]
+        
+        return rows
+
+    async def get_person_profile(self, person_id: str) -> Dict[str, Any]:
+        """Fetch full person details and filmography."""
+        # Check if local ID or TMDB ID
+        is_uuid = False
+        try:
+            UUID(person_id)
+            is_uuid = True
+        except ValueError: pass
+        
+        tmdb_id = None
+        if is_uuid:
+            res = await self.db.execute(text("SELECT tmdb_id FROM persons WHERE id::text = :id"), {"id": person_id})
+            row = res.mappings().one_or_none()
+            tmdb_id = row['tmdb_id'] if row else None
+        else:
+            try:
+                tmdb_id = int(person_id)
+            except ValueError: pass
+            
+        if not tmdb_id:
+            return {}
+            
+        # Fetch from TMDB (always fresh for detail screen)
+        details = await self.tmdb_client.get_person_details(tmdb_id)
+        if not details: return {}
+        
+        credits = await self.tmdb_client.get_person_combined_credits(tmdb_id)
+        
+        # Separate Top Movies (popularity high) and Full Filmography
+        details['top_credits'] = credits[:10]
+        details['filmography'] = credits
+        
+        return details
 
     async def get_hot_reviews(self, limit: int = 10) -> List[Dict[str, Any]]:
         result = await self.db.execute(text('''
@@ -483,18 +626,21 @@ class ContentService:
         """Upsert a person into the persons table."""
         try:
             stmt = text('''
-                INSERT INTO persons (tmdb_id, name, profile_image_url)
-                VALUES (:tmdb_id, :name, :profile_image_url)
+                INSERT INTO persons (tmdb_id, name, profile_image_url, known_for_department)
+                VALUES (:tmdb_id, :name, :profile_image_url, :dept)
                 ON CONFLICT (tmdb_id) DO UPDATE SET
                     name = EXCLUDED.name,
                     profile_image_url = EXCLUDED.profile_image_url,
+                    known_for_department = EXCLUDED.known_for_department,
+                    last_synced_at = now(),
                     updated_at = now()
                 RETURNING id
             ''')
             res = await self.db.execute(stmt, {
                 'tmdb_id': p.get('tmdb_id') or p.get('id'),
                 'name': p.get('name'),
-                'profile_image_url': p.get('profile_url') or p.get('profile_path') or p.get('image_url')
+                'profile_image_url': p.get('profile_url') or p.get('profile_path') or p.get('image_url'),
+                'dept': p.get('known_for_department')
             })
             row = res.mappings().one_or_none()
             return str(row['id']) if row else None
@@ -617,14 +763,16 @@ class ContentService:
             tid = it.get('tmdb_id')
             if tid and tid not in seen: seen.add(tid); u_items.append(it)
         stmt_text = '''
-            INSERT INTO content (tmdb_id, content_type, title, original_title, synopsis, poster_url, backdrop_url, external_rating, external_rating_source, release_date, genres, is_permanent)
-            VALUES (:tmdb_id, :content_type, :title, :original_title, :synopsis, :poster_url, :backdrop_url, :external_rating, :external_rating_source, :release_date, :genres, :is_permanent)
+            INSERT INTO content (tmdb_id, content_type, title, original_title, original_language, synopsis, poster_url, backdrop_url, external_rating, external_rating_source, release_date, genres, is_permanent)
+            VALUES (:tmdb_id, :content_type, :title, :original_title, :original_language, :synopsis, :poster_url, :backdrop_url, :external_rating, :external_rating_source, :release_date, :genres, :is_permanent)
             ON CONFLICT (tmdb_id) DO UPDATE SET 
                 title = EXCLUDED.title, 
+                content_type = EXCLUDED.content_type,
                 synopsis = EXCLUDED.synopsis, 
                 poster_url = EXCLUDED.poster_url, 
                 backdrop_url = EXCLUDED.backdrop_url, 
                 external_rating = EXCLUDED.external_rating, 
+                original_language = EXCLUDED.original_language,
                 genres = EXCLUDED.genres, 
                 last_synced_at = now(),
                 is_permanent = content.is_permanent OR EXCLUDED.is_permanent
@@ -634,14 +782,24 @@ class ContentService:
         params = []
         for it in u_items:
             rd = it.get('release_date')
+            ctype = it.get('content_type')
+            
+            # Smart Re-classification: If it's a TMDB Series but is Japanese Animation, it's Anime.
+            # (TMDB Genre 16 is Animation)
+            genres = it.get('genres', [])
+            if ctype == 'series' and it.get('original_language') == 'ja' and ('Animation' in genres or 16 in it.get('genre_ids', [])):
+                ctype = 'anime'
+                it['content_type'] = 'anime'
+
             if rd and isinstance(rd, str):
                 try: rd = datetime.strptime(rd[:10], '%Y-%m-%d').date()
                 except ValueError: rd = None
             params.append({ 
                 'tmdb_id': it.get('tmdb_id'), 
-                'content_type': it.get('content_type'), 
+                'content_type': ctype, 
                 'title': it.get('title'), 
                 'original_title': it.get('original_title'), 
+                'original_language': it.get('original_language'),
                 'synopsis': it.get('synopsis'), 
                 'poster_url': it.get('poster_url'), 
                 'backdrop_url': it.get('backdrop_url'), 
@@ -757,6 +915,35 @@ class ContentService:
             await self.db.rollback()
             return 0
 
+    async def cleanup_stale_persons(self, hours: int = 24) -> int:
+        """
+        Deletes persons that are not permanent, were last synced more than X hours ago,
+        and are not referenced in any user favorites.
+        """
+        logger.info(f"Starting stale persons cleanup (older than {hours} hours)...")
+        try:
+            # We use a single query with NOT EXISTS for efficiency
+            # TMDB ID in persons is currently an integer, cast to text to match repo references.
+            query = text(f"""
+                DELETE FROM persons
+                WHERE is_permanent = false
+                AND last_synced_at < now() - interval '{{hours}} hours'
+                AND NOT EXISTS (SELECT 1 FROM user_person_favorites WHERE person_id = CAST(persons.tmdb_id AS TEXT))
+                AND NOT EXISTS (SELECT 1 FROM user_actor_preferences WHERE person_id = CAST(persons.tmdb_id AS TEXT))
+                AND NOT EXISTS (SELECT 1 FROM user_director_preferences WHERE person_id = CAST(persons.tmdb_id AS TEXT))
+            """.replace("{hours}", str(hours)))
+            
+            result = await self.db.execute(query)
+            await self.db.commit()
+            
+            deleted_count = result.rowcount if result.rowcount is not None else 0
+            logger.info(f"Person cleanup finished. Deleted {deleted_count} stale persons.")
+            return deleted_count
+        except Exception as e:
+            logger.error(f"Person cleanup failed: {e}")
+            await self.db.rollback()
+            return 0
+
     async def cleanup_old_activities(self, days: int = 7) -> int:
         """Deletes activity logs older than specified days."""
         logger.info(f"Starting activity log cleanup (older than {days} days)...")
@@ -772,3 +959,82 @@ class ContentService:
             logger.error(f"Activity cleanup failed: {e}")
             await self.db.rollback()
             return 0
+
+    async def get_landing_posters(self, target_count: int = 12) -> List[str]:
+        """
+        Returns a stable list of poster URLs for the landing screen carousel.
+        Strategy:
+          1. If the DB already has >= target_count permanently saved posters, return them.
+          2. Otherwise, fetch trending movies from TMDB, pick the first ones with a valid
+             poster, save them permanently to the landing_posters table, and return them.
+          3. If TMDB is unreachable, return whatever is in the DB (even if < target_count).
+        """
+        try:
+            # Step 1: Check if we already have enough saved posters
+            res = await self.db.execute(text(
+                "SELECT poster_url FROM landing_posters ORDER BY id LIMIT :limit"
+            ), {"limit": target_count})
+            rows = [r["poster_url"] for r in res.mappings()]
+
+            if len(rows) >= target_count:
+                logger.info(f"Landing posters: serving {len(rows)} from DB cache.")
+                return rows
+
+            # Step 2: Fetch from TMDB
+            logger.info("Landing posters: not enough in DB — fetching from TMDB...")
+            try:
+                trending = await self.tmdb_client.get_trending_movies(page=1)
+                # Also grab popular for more variety
+                popular = await self.tmdb_client.get_popular_movies(page=1)
+                all_items = trending + popular
+            except Exception as tmdb_err:
+                logger.error(f"Landing posters: TMDB fetch failed: {tmdb_err}")
+                # Return whatever we have in DB, even if empty
+                return rows
+
+            # Filter: only items with a valid poster
+            new_posters = []
+            for item in all_items:
+                purl = item.get("poster_url")
+                if purl and purl not in rows:
+                    new_posters.append({
+                        "poster_url": purl,
+                        "tmdb_id": item.get("tmdb_id"),
+                        "title": item.get("title"),
+                    })
+                if len(new_posters) >= (target_count - len(rows)):
+                    break
+
+            # Step 3: Save new posters permanently (ON CONFLICT DO NOTHING)
+            for p in new_posters:
+                try:
+                    await self.db.execute(text(
+                        """
+                        INSERT INTO landing_posters (poster_url, tmdb_id, title, fetched_at)
+                        VALUES (:url, :tmdb_id, :title, now())
+                        ON CONFLICT (poster_url) DO NOTHING
+                        """
+                    ), {"url": p["poster_url"], "tmdb_id": p["tmdb_id"], "title": p["title"]})
+                except Exception as insert_err:
+                    logger.warning(f"Landing posters insert skipped: {insert_err}")
+                    await self.db.rollback()
+
+            try:
+                await self.db.commit()
+            except Exception as commit_err:
+                logger.warning(f"Landing posters commit warning: {commit_err}")
+                await self.db.rollback()
+
+            # Re-fetch from DB for a clean, consistent response
+            res2 = await self.db.execute(text(
+                "SELECT poster_url FROM landing_posters ORDER BY id LIMIT :limit"
+            ), {"limit": target_count})
+            final_rows = [r["poster_url"] for r in res2.mappings()]
+
+            logger.info(f"Landing posters: returning {len(final_rows)} posters.")
+            return final_rows
+
+        except Exception as e:
+            logger.error(f"get_landing_posters failed: {e}")
+            # Ultimate fallback — return empty list; client will use mock data
+            return []

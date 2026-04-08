@@ -246,10 +246,17 @@ class SocialService:
             is_spoiler=contains_spoiler
         )
 
-        # 2. Update content average rating (Optional for now, but good practice)
-        # 3. Log activity
+        # 2. Automatic watch/rewatch logic
         from app.services.action_service import ActionService
+        from app.models.action import ActionType
         action_svc = ActionService(self.db)
+        
+        # Trigger watch logic
+        await action_svc._handle_watch(user_id, content_id, ActionType.watch)
+        # Sync to Watched collection
+        await action_svc._sync_to_collection(user_id, content_id, 'Watched')
+
+        # 3. Log activity for the review itself
         await action_svc._log_activity(
             user_id=user_id,
             activity_type='reviewed',
@@ -316,6 +323,7 @@ class SocialService:
         await action_svc._log_activity(
             user_id=user_id,
             activity_type='updated_review',
+            content_id=result['content_id'],
             review_id=review_id,
             details={'rating': data.get('star_rating')}
         )

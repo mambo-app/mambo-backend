@@ -64,8 +64,9 @@ async def lifespan(app: FastAPI):
                 async with AsyncSessionLocal() as db:
                     service = ContentService(db)
                     deleted_stale = await service.cleanup_stale_content(hours=24)
+                    deleted_persons = await service.cleanup_stale_persons(hours=24)
                     deleted_activities = await service.cleanup_old_activities(days=7)
-                logger.info(f"Content cleanup cycle completed. Deleted {deleted_stale} stale items and {deleted_activities} old activities.")
+                logger.info(f"Content cleanup cycle completed. Deleted {deleted_stale} stale items, {deleted_persons} stale persons, and {deleted_activities} old activities.")
             except Exception as e:
                 logger.error(f"Content cleanup scheduler error: {e}")
             await asyncio.sleep(12 * 3600)  # 12 hours

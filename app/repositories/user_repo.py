@@ -45,6 +45,16 @@ class UserRepository(BaseRepository):
             LIMIT :limit OFFSET :offset
         ''', {'query': query, 'limit': limit, 'offset': offset})
 
+    async def search_by_username_prefix(self, prefix: str, limit: int) -> list[dict]:
+        return await self.fetch_many('''
+            SELECT id, username, display_name, avatar_url, is_verified
+            FROM profiles
+            WHERE username ILIKE :prefix
+            AND is_deleted = false
+            ORDER BY username ASC
+            LIMIT :limit
+        ''', {'prefix': f'{prefix}%', 'limit': limit})
+
     async def follow(self, follower_id: str, following_id: str) -> None:
         # 1. Insert follow relationship
         res = await self.db.execute(text('''
@@ -174,17 +184,16 @@ class UserRepository(BaseRepository):
         
         sql += '''
             FROM profiles p
-            JOIN follows f ON f.following_id = p.id
-            WHERE f.created_at > now() - interval '7 days'
-            AND p.is_deleted = false
+            LEFT JOIN follows f ON f.following_id = p.id AND f.created_at > now() - interval '7 days'
+            WHERE p.is_deleted = false
         '''
         
         if viewer_id:
             sql += ' AND p.id != CAST(:vid AS UUID)'
             
         sql += '''
-            GROUP BY p.id, p.username, p.display_name, p.avatar_url, p.is_verified
-            ORDER BY recent_followers DESC
+            GROUP BY p.id, p.username, p.display_name, p.avatar_url, p.is_verified, p.created_at
+            ORDER BY recent_followers DESC, p.created_at DESC
             LIMIT :limit
         '''
         
@@ -192,3 +201,90 @@ class UserRepository(BaseRepository):
 
     async def delete_account(self, user_id: str) -> None:
         await self.execute('DELETE FROM profiles WHERE id = :user_id', {'user_id': user_id})
+    async def toggle_person_favorite(self, user_id: str, person_id: str, name: str, profile_url: Optional[str], is_actor: bool) -> bool:
+        # Check if already exists
+        exists = await self.fetch_one('''
+            SELECT id FROM user_person_favorites 
+            WHERE user_id = CAST(:uid AS UUID) AND person_id = :pid
+        ''', {'uid': user_id, 'pid': person_id})
+        
+        if exists:
+            await self.execute('''
+                DELETE FROM user_person_favorites 
+                WHERE user_id = CAST(:uid AS UUID) AND person_id = :pid
+            ''', {'uid': user_id, 'pid': person_id})
+            
+            # Check if anyone else favorites them
+            other_favs = await self.fetch_one('''
+                SELECT 1 FROM user_person_favorites WHERE person_id = :pid LIMIT 1
+            ''', {'pid': person_id})
+            
+            if not other_favs:
+                await self.execute('''
+                    UPDATE persons SET is_permanent = false 
+                    WHERE CAST(tmdb_id AS TEXT) = :pid
+                ''', {'pid': person_id})
+                
+            return False
+        else:
+            await self.execute('''
+                INSERT INTO user_person_favorites (user_id, person_id, name, profile_url, is_actor)
+                VALUES (CAST(:uid AS UUID), :pid, :name, :purl, :is_actor)
+            ''', {
+                'uid': user_id, 
+                'pid': person_id, 
+                'name': name, 
+                'purl': profile_url, 
+                'is_actor': is_actor
+            })
+            
+            # Ensure person is marked as permanent
+            await self.execute('''
+                UPDATE persons SET is_permanent = true 
+                WHERE CAST(tmdb_id AS TEXT) = :pid
+            ''', {'pid': person_id})
+            
+            return True
+
+    async def get_liked_content(self, user_id: str) -> list[dict]:
+        result = await self.db.execute(text('''
+            SELECT c.id as content_id, c.title, c.poster_url, c.content_type, 
+                   ucs.updated_at as liked_at, ucs.favorite_order
+            FROM user_content_status ucs
+            JOIN content c ON c.id = ucs.content_id
+            WHERE ucs.user_id = CAST(:user_id AS UUID) AND ucs.is_liked = true
+            ORDER BY ucs.favorite_order ASC NULLS LAST, ucs.updated_at DESC
+        '''), {'user_id': user_id})
+        return [dict(row) for row in result.mappings()]
+
+    async def set_top_favorites(self, user_id: str, content_ids: list[str]) -> None:
+        # Reset all first
+        await self.execute('''
+            UPDATE user_content_status 
+            SET favorite_order = NULL 
+            WHERE user_id = CAST(:uid AS UUID)
+        ''', {'uid': user_id})
+        
+        # Set new ones in order
+        for i, cid in enumerate(content_ids):
+            await self.execute('''
+                UPDATE user_content_status 
+                SET favorite_order = :order 
+                WHERE user_id = CAST(:uid AS UUID) AND content_id = CAST(:cid AS UUID)
+            ''', {'uid': user_id, 'cid': cid, 'order': i + 1})
+        
+        await self.db.commit()
+
+    async def get_favorite_persons(self, user_id: str, is_actor: bool) -> list[dict]:
+        return await self.fetch_many('''
+            SELECT * FROM user_person_favorites 
+            WHERE user_id = CAST(:uid AS UUID) AND is_actor = :is_actor
+            ORDER BY created_at DESC
+        ''', {'uid': user_id, 'is_actor': is_actor})
+
+    async def is_person_favorite(self, user_id: str, person_id: str) -> bool:
+        res = await self.fetch_one('''
+            SELECT 1 FROM user_person_favorites 
+            WHERE user_id = CAST(:uid AS UUID) AND person_id = :pid
+        ''', {'uid': user_id, 'pid': person_id})
+        return res is not None

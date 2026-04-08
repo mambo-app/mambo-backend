@@ -1,5 +1,5 @@
 import httpx
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import List, Dict, Any, Optional
 from app.core.config import settings
 import logging
@@ -243,18 +243,21 @@ class TMDBClient:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
     async def get_upcoming_movies(self, page: int = 1) -> List[Dict[str, Any]]:
-        """Fetch upcoming movies (future release dates)."""
+        """Fetch upcoming movies (future release dates). Fetches 2 pages by default for depth."""
         if not self.api_key:
             return []
         async with httpx.AsyncClient() as client:
             try:
-                resp = await client.get(
-                    f"{self.BASE_URL}/movie/upcoming",
-                    params={"api_key": self.api_key, "language": "en-US", "page": page},
-                    timeout=10.0
-                )
-                resp.raise_for_status()
-                return [self._normalize_movie(m) for m in resp.json().get("results", [])]
+                all_results = []
+                for p in [page, page + 1]:
+                    resp = await client.get(
+                        f"{self.BASE_URL}/movie/upcoming",
+                        params={"api_key": self.api_key, "language": "en-US", "page": p},
+                        timeout=10.0
+                    )
+                    resp.raise_for_status()
+                    all_results.extend(resp.json().get("results", []))
+                return [self._normalize_movie(m) for m in all_results]
             except Exception as e:
                 logger.error(f"Error fetching upcoming movies: {e}")
                 return []
@@ -265,27 +268,60 @@ class TMDBClient:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
     async def get_indian_movies(self, page: int = 1) -> List[Dict[str, Any]]:
-        """Fetch popular Indian movies (Bollywood with major hits)."""
+        """Fetch popular Indian movies (released in last 6 months). Fetches 2 pages."""
         if not self.api_key:
             return []
         async with httpx.AsyncClient() as client:
             try:
+                # Recency filter: released in last 180 days
+                recent_cutoff = (date.today() - timedelta(days=180)).isoformat()
+                all_results = []
+                for p in [page, page + 1]:
+                    resp = await client.get(
+                        f"{self.BASE_URL}/discover/movie",
+                        params={
+                            "api_key": self.api_key,
+                            "language": "en-US",
+                            "with_original_language": self._INDIAN_LANGS_BROAD,
+                            "region": "IN",
+                            "primary_release_date.gte": recent_cutoff,
+                            "sort_by": "popularity.desc",
+                            "page": p,
+                        },
+                        timeout=10.0
+                    )
+                    resp.raise_for_status()
+                    all_results.extend(resp.json().get("results", []))
+                return [self._normalize_movie(m) for m in all_results]
+            except Exception as e:
+                logger.error(f"Error fetching Indian movies: {e}")
+                return []
+
+    # ── NEW: BOOKMYSHOW STYLE INGRESS ─────────────────────────────────────────
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
+    async def get_indian_now_playing(self, page: int = 1) -> List[Dict[str, Any]]:
+        """Fetch Indian movies currently in theaters (region=IN)."""
+        if not self.api_key: return []
+        async with httpx.AsyncClient() as client:
+            try:
                 resp = await client.get(
-                    f"{self.BASE_URL}/discover/movie",
+                    f"{self.BASE_URL}/movie/now_playing",
                     params={
                         "api_key": self.api_key,
                         "language": "en-US",
-                        "with_original_language": self._INDIAN_LANGS_BROAD,
                         "region": "IN",
-                        "sort_by": "popularity.desc",
                         "page": page,
                     },
                     timeout=10.0
                 )
                 resp.raise_for_status()
-                return [self._normalize_movie(m) for m in resp.json().get("results", [])]
+                # Filter to only include Indian original languages
+                results = [m for m in resp.json().get("results", []) 
+                          if m.get("original_language") in self._INDIAN_LANGS_BROAD.split('|')]
+                return [self._normalize_movie(m) for m in results]
             except Exception as e:
-                logger.error(f"Error fetching Indian movies: {e}")
+                logger.error(f"Error fetching Indian now playing: {e}")
                 return []
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
@@ -371,26 +407,30 @@ class TMDBClient:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
     async def get_indian_upcoming_movies(self, page: int = 1) -> List[Dict[str, Any]]:
-        """Fetch upcoming Indian movies."""
+        """Fetch upcoming Indian movies. Deep fetch: 5 pages."""
         if not self.api_key:
             return []
         async with httpx.AsyncClient() as client:
             try:
                 today = date.today().isoformat()
-                resp = await client.get(
-                    f"{self.BASE_URL}/discover/movie",
-                    params={
-                        "api_key": self.api_key,
-                        "language": "en-US",
-                        "with_original_language": self._INDIAN_LANGS_BROAD,
-                        "primary_release_date.gte": today,
-                        "sort_by": "popularity.desc",
-                        "page": page,
-                    },
-                    timeout=10.0
-                )
-                resp.raise_for_status()
-                return [self._normalize_movie(m) for m in resp.json().get("results", [])]
+                all_results = []
+                # BookMyShow style deeper fetch for roadmap reliability
+                for p in range(page, page + 5):
+                    resp = await client.get(
+                        f"{self.BASE_URL}/discover/movie",
+                        params={
+                            "api_key": self.api_key,
+                            "language": "en-US",
+                            "with_original_language": self._INDIAN_LANGS_BROAD,
+                            "primary_release_date.gte": today,
+                            "sort_by": "popularity.desc",
+                            "page": p,
+                        },
+                        timeout=10.0
+                    )
+                    resp.raise_for_status()
+                    all_results.extend(resp.json().get("results", []))
+                return [self._normalize_movie(m) for m in all_results]
             except Exception as e:
                 logger.error(f"Error fetching Indian upcoming movies: {e}")
                 return []
@@ -420,6 +460,7 @@ class TMDBClient:
             "content_type": "movie",
             "title": item.get("title") or item.get("original_title", ""),
             "original_title": item.get("original_title"),
+            "original_language": item.get("original_language"),
             "synopsis": item.get("overview"),
             "poster_url": f"{self.IMAGE_BASE}{poster}" if poster else None,
             "backdrop_url": f"{self.BACKDROP_BASE}{backdrop}" if backdrop else None,
@@ -441,6 +482,7 @@ class TMDBClient:
             "content_type": "series",
             "title": item.get("name") or item.get("original_name", ""),
             "original_title": item.get("original_name"),
+            "original_language": item.get("original_language"),
             "synopsis": item.get("overview"),
             "poster_url": f"{self.IMAGE_BASE}{poster}" if poster else None,
             "backdrop_url": f"{self.BACKDROP_BASE}{backdrop}" if backdrop else None,
@@ -452,52 +494,58 @@ class TMDBClient:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
     async def get_upcoming_series(self, page: int = 1) -> List[Dict[str, Any]]:
-        """Fetch upcoming TV shows using discover (first_air_date.gte)."""
+        """Fetch upcoming TV shows. Fetches 2 pages."""
         if not self.api_key: return []
         async with httpx.AsyncClient() as client:
             try:
                 today = date.today().isoformat()
-                resp = await client.get(
-                    f"{self.BASE_URL}/discover/tv",
-                    params={
-                        "api_key": self.api_key,
-                        "language": "en-US",
-                        "first_air_date.gte": today,
-                        "sort_by": "popularity.desc",
-                        "page": page,
-                    },
-                    timeout=10.0
-                )
-                resp.raise_for_status()
-                return [self._normalize_series(s) for s in resp.json().get("results", [])]
+                all_results = []
+                for p in [page, page + 1]:
+                    resp = await client.get(
+                        f"{self.BASE_URL}/discover/tv",
+                        params={
+                            "api_key": self.api_key,
+                            "language": "en-US",
+                            "first_air_date.gte": today,
+                            "sort_by": "popularity.desc",
+                            "page": p,
+                        },
+                        timeout=10.0
+                    )
+                    resp.raise_for_status()
+                    all_results.extend(resp.json().get("results", []))
+                return [self._normalize_series(s) for s in all_results]
             except Exception as e:
                 logger.error(f"Error fetching upcoming series: {e}")
                 return []
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
     async def get_indian_upcoming_series(self, page: int = 1) -> List[Dict[str, Any]]:
-        """Fetch upcoming Indian TV shows on OTT platforms."""
+        """Fetch upcoming Indian TV shows on OTT platforms. Fetches 2 pages."""
         if not self.api_key: return []
         async with httpx.AsyncClient() as client:
             try:
                 today = date.today().isoformat()
-                resp = await client.get(
-                    f"{self.BASE_URL}/discover/tv",
-                    params={
-                        "api_key": self.api_key,
-                        "language": "en-US",
-                        "with_original_language": self._INDIAN_LANGS,
-                        "without_genres": "10766",
-                        "watch_region": "IN",
-                        "with_watch_providers": "8|119|122|237|232",
-                        "first_air_date.gte": today,
-                        "sort_by": "popularity.desc",
-                        "page": page,
-                    },
-                    timeout=10.0
-                )
-                resp.raise_for_status()
-                return [self._normalize_series(s) for s in resp.json().get("results", [])]
+                all_results = []
+                for p in [page, page + 1]:
+                    resp = await client.get(
+                        f"{self.BASE_URL}/discover/tv",
+                        params={
+                            "api_key": self.api_key,
+                            "language": "en-US",
+                            "with_original_language": self._INDIAN_LANGS,
+                            "without_genres": "10766",
+                            "watch_region": "IN",
+                            "with_watch_providers": "8|119|122|237|232",
+                            "first_air_date.gte": today,
+                            "sort_by": "popularity.desc",
+                            "page": p,
+                        },
+                        timeout=10.0
+                    )
+                    resp.raise_for_status()
+                    all_results.extend(resp.json().get("results", []))
+                return [self._normalize_series(s) for s in all_results]
             except Exception as e:
                 logger.error(f"Error fetching Indian upcoming series: {e}")
                 return []
@@ -557,5 +605,98 @@ class TMDBClient:
             "profile_url": f"{self.IMAGE_BASE}{profile}" if profile else None,
             "character": p.get("character") if role_type == "cast" else None,
             "job": p.get("job") if role_type == "crew" else None,
-            "department": p.get("department")
+            "department": p.get("department"),
+            "known_for_department": p.get("known_for_department")
         }
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
+    async def search_people(self, query: str, page: int = 1) -> List[Dict[str, Any]]:
+        """Search for people (actors, directors) on TMDB."""
+        if not self.api_key: return []
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(
+                    f"{self.BASE_URL}/search/person",
+                    params={
+                        "api_key": self.api_key,
+                        "language": "en-US",
+                        "query": query,
+                        "page": page,
+                        "include_adult": "false",
+                    },
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                results = resp.json().get("results", [])
+                return [self._normalize_person(p, "search") for p in results]
+            except Exception as e:
+                logger.error(f"TMDB search_people failed: {e}")
+                return []
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
+    async def get_person_details(self, person_id: int) -> Dict[str, Any]:
+        """Fetch detailed person profile."""
+        if not self.api_key: return {}
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(
+                    f"{self.BASE_URL}/person/{person_id}",
+                    params={"api_key": self.api_key, "language": "en-US"},
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                profile = data.get("profile_path")
+                return {
+                    "tmdb_id": data.get("id"),
+                    "name": data.get("name"),
+                    "biography": data.get("biography"),
+                    "birthday": data.get("birthday"),
+                    "place_of_birth": data.get("place_of_birth"),
+                    "profile_url": f"{self.IMAGE_BASE}{profile}" if profile else None,
+                    "known_for_department": data.get("known_for_department"),
+                }
+            except Exception as e:
+                logger.error(f"TMDB get_person_details failed: {e}")
+                return {}
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
+    async def get_person_combined_credits(self, person_id: int) -> List[Dict[str, Any]]:
+        """Fetch all movie and TV credits for a person."""
+        if not self.api_key: return []
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(
+                    f"{self.BASE_URL}/person/{person_id}/combined_credits",
+                    params={"api_key": self.api_key, "language": "en-US"},
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                
+                # Combine cast and crew (Directing/Writing focus)
+                cast = data.get("cast", [])
+                crew = [c for c in data.get("crew", []) if c.get("department") in ["Directing", "Writing", "Production"]]
+                
+                all_credits = cast + crew
+                
+                # Deduplicate and normalize
+                seen = set()
+                results = []
+                for c in all_credits:
+                    cid = c.get("id")
+                    ctype = c.get("media_type") # movie or tv
+                    key = f"{ctype}_{cid}"
+                    if key not in seen:
+                        seen.add(key)
+                        if ctype == "movie":
+                            results.append(self._normalize_movie(c))
+                        else:
+                            results.append(self._normalize_series(c))
+                
+                # Sort by popularity for "Top Movies"
+                results.sort(key=lambda x: x.get("popularity", 0), reverse=True)
+                return results
+            except Exception as e:
+                logger.error(f"TMDB get_person_combined_credits failed: {e}")
+                return []

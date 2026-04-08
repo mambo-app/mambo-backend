@@ -9,7 +9,7 @@ from app.models.common import ok
 
 router = APIRouter(tags=['discover'])
 
-@router.get('/search', response_model=Dict[str, Any])
+@router.get('/search', response_model=dict[str, Any])
 async def search_content(
     query: str,
     content_type: Optional[str] = Query(None, description="Filter: movie, series, anime"),
@@ -24,7 +24,7 @@ async def search_content(
         await service.save_search_history(user_id, query, content_type)
     return ok({"items": items})
 
-@router.get('/history', response_model=Dict[str, Any])
+@router.get('/history', response_model=dict[str, Any])
 async def get_search_history(
     limit: int = 10,
     db: AsyncSession = Depends(get_db),
@@ -34,7 +34,7 @@ async def get_search_history(
     items = await service.get_search_history(user_id, limit)
     return ok({"items": items})
 
-@router.delete('/history', response_model=Dict[str, Any])
+@router.delete('/history', response_model=dict[str, Any])
 async def clear_search_history(
     query: Optional[str] = Query(None, description="Specific query to remove; omit to clear all"),
     db: AsyncSession = Depends(get_db),
@@ -44,7 +44,7 @@ async def clear_search_history(
     deleted = await service.clear_search_history(user_id, query)
     return ok({"deleted": deleted})
 
-@router.get('/trending-creators', response_model=Dict[str, Any])
+@router.get('/trending-creators', response_model=dict[str, Any])
 async def get_trending_creators(
     limit: int = 10,
     db: AsyncSession = Depends(get_db),
@@ -54,15 +54,32 @@ async def get_trending_creators(
     service = UserService(db)
     items = await service.get_trending_creators(limit, viewer_id=user_id)
     return ok({"items": items})
-    return ok({"items": items})
 
-@router.get('/{mode}', response_model=Dict[str, Any])
+@router.get('/{mode}', response_model=dict[str, Any])
 async def get_discover(
     mode: str, 
     db: AsyncSession = Depends(get_db),
     user_id: Optional[str] = Depends(get_current_user_id_optional)
 ):
-    # mode is one of: movie, series, anime
     service = ContentService(db)
     data = await service.get_discover_content(mode, user_id=user_id)
     return ok(data)
+
+@router.get('/search/people', response_model=dict[str, Any])
+async def search_people(
+    query: str,
+    limit: int = 20,
+    db: AsyncSession = Depends(get_db),
+):
+    service = ContentService(db)
+    items = await service.search_people(query, limit)
+    return ok({"items": items})
+
+@router.get('/person/{person_id}', response_model=dict[str, Any])
+async def get_person_profile(
+    person_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    service = ContentService(db)
+    profile = await service.get_person_profile(person_id)
+    return ok(profile)

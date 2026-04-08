@@ -40,9 +40,21 @@ class ReviewService:
             UPDATE reviews
             SET is_deleted = true, deleted_at = now()
             WHERE id = :review_id AND user_id = :user_id
-            RETURNING id
+            RETURNING id, user_id
         '''), {'review_id': review_id, 'user_id': user_id})
-        if not result.mappings().first():
+        
+        row = result.mappings().first()
+        if not row:
             await self.db.commit()
             raise ForbiddenError('Review not found or not yours.')
+            
+        # Update stats
+        await self.db.execute(text('''
+            UPDATE user_stats
+            SET total_reviews = GREATEST(0, COALESCE(total_reviews, 0) - 1),
+                total_posts = GREATEST(0, COALESCE(total_posts, 0) - 1),
+                updated_at = now()
+            WHERE user_id = :uid
+        '''), {'uid': row['user_id']})
+        
         await self.db.commit()

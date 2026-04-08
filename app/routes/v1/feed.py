@@ -63,12 +63,16 @@ async def get_received_recommendations(
 ):
     # Fetch from activity_log where type is receive_recommendation
     query = '''
-        SELECT a.created_at as recommended_at, c.*, p.username as sender_username, p.display_name as sender_name
-        FROM activity_log a
-        JOIN content c ON c.id = a.content_id
-        JOIN profiles p ON p.id = a.related_user_id
-        WHERE a.user_id = :uid AND a.activity_type = 'receive_recommendation'
-        ORDER BY a.created_at DESC
+        WITH RankedRecs AS (
+            SELECT a.created_at as recommended_at, c.*, p.username as sender_username, p.display_name as sender_name,
+                   ROW_NUMBER() OVER(PARTITION BY a.content_id ORDER BY a.created_at DESC) as rn
+            FROM activity_log a
+            JOIN content c ON c.id = a.content_id
+            JOIN profiles p ON p.id = a.related_user_id
+            WHERE a.user_id = :uid AND a.activity_type = 'receive_recommendation'
+        )
+        SELECT * FROM RankedRecs WHERE rn = 1
+        ORDER BY recommended_at DESC
         LIMIT :limit
     '''
     res = await db.execute(text(query), {'uid': UUID(user_id), 'limit': limit})

@@ -219,6 +219,19 @@ class ChatService:
             
         return msg
 
+    async def delete_message(self, user_id: str, message_id: str) -> bool:
+        """Deletes a message if the sender matches the user_id."""
+        res = await self.db.execute(text('''
+            DELETE FROM messages 
+            WHERE id = :mid AND sender_id = :uid
+        '''), {'mid': message_id, 'uid': user_id})
+        
+        if res.rowcount == 0:
+            raise ValueError("Message not found or you don't have permission to delete it")
+            
+        await self.db.commit()
+        return True
+
     async def get_or_create_direct_conversation(self, user_id1: str, user_id2: str, bypass_friendship_check: bool = False) -> str:
         """Find an existing 1:1 conversation or create a new one, handling race conditions."""
         u1, u2 = sorted([str(user_id1), str(user_id2)])

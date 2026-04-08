@@ -144,28 +144,37 @@ class ActionService:
     async def _handle_watch(self, user_id: UUID, content_id: UUID, action: ActionType):
         # 1. Fetch current watch count to decide activity type
         status_res = await self.db.execute(text(
-            "SELECT watch_count FROM user_content_status WHERE user_id = :uid AND content_id = :cid"
+            "SELECT watch_count, is_watched FROM user_content_status WHERE user_id = :uid AND content_id = :cid"
         ), {"uid": user_id, "cid": content_id})
         current_status = status_res.mappings().one_or_none() or {}
         old_count = current_status.get('watch_count', 0)
+        was_watched = current_status.get('is_watched', False)
+
+        init_count = 2 if action == ActionType.rewatch and old_count == 0 else 1
 
         # 2. Update status
         stmt_status = text('''
             INSERT INTO user_content_status (user_id, content_id, is_watched, watch_count, first_watched_at, last_watched_at)
-            VALUES (:user_id, :content_id, true, 1, now(), now())
+            VALUES (:user_id, :content_id, true, :init_count, now(), now())
             ON CONFLICT (user_id, content_id) DO UPDATE SET
                 is_watched = true,
-                watch_count = user_content_status.watch_count + 1,
+                watch_count = CASE 
+                                WHEN user_content_status.is_watched = false THEN :init_count 
+                                ELSE user_content_status.watch_count + 1 
+                              END,
                 last_watched_at = now(),
                 updated_at = now()
         ''')
-        await self.db.execute(stmt_status, {'user_id': user_id, 'content_id': content_id})
+        await self.db.execute(stmt_status, {'user_id': user_id, 'content_id': content_id, 'init_count': init_count})
 
         # 3. Add to history
         watch_type = 'first_watch' if old_count == 0 else 'rewatch'
         stmt_history = text('''
             INSERT INTO watch_history (user_id, content_id, watch_type, watched_at)
             VALUES (:user_id, :content_id, :watch_type, now())
+            ON CONFLICT (user_id, content_id) DO UPDATE SET 
+                watch_type = EXCLUDED.watch_type,
+                watched_at = EXCLUDED.watched_at
         ''')
         await self.db.execute(stmt_history, {'user_id': user_id, 'content_id': content_id, 'watch_type': watch_type})
 

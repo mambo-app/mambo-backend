@@ -97,3 +97,19 @@ class UpvoteRequest(BaseModel):
     target_id: UUID
     target_type: str = Field(..., pattern="^(post|comment)$")
 
+class PersonFavoriteRequest(BaseModel):
+    person_id: str
+    name: str
+    profile_url: Optional[str] = None
+    known_for: Optional[str] = None
+    is_actor: bool = True
+
+class FavoritePersonResponse(BaseModel):
+    id: UUID
+    user_id: UUID
+    person_id: str
+    name: str
+    profile_url: Optional[str] = None
+    is_actor: bool
+    created_at: datetime
+
