@@ -1,12 +1,17 @@
 import sentry_sdk
+print("MAMBO: Starting main.py...")
 from sentry_sdk.integrations.fastapi import FastApiIntegration
+print("MAMBO: Sentry imported")
 from fastapi import FastAPI
+print("MAMBO: FastAPI imported")
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, Response
 from contextlib import asynccontextmanager
 
 from app.core.config import settings
+print("MAMBO: Settings loaded")
 from app.core.database import engine
+print("MAMBO: Engine created")
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
 from app.middleware.request_id import RequestIDMiddleware
