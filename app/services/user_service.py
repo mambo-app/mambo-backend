@@ -83,7 +83,7 @@ class UserService:
         actors_res = await self.db.execute(text('''
             SELECT p.name 
             FROM user_actor_preferences uap
-            JOIN persons p ON CAST(p.id AS TEXT) = uap.person_id
+            JOIN persons p ON p.id = CAST(uap.person_id AS TEXT)
             WHERE uap.user_id = CAST(:id AS UUID)
             ORDER BY uap.preference_order ASC
         '''), {'id': owner_id})
@@ -93,7 +93,7 @@ class UserService:
         directors_res = await self.db.execute(text('''
             SELECT p.name 
             FROM user_director_preferences udp
-            JOIN persons p ON CAST(p.id AS TEXT) = udp.person_id
+            JOIN persons p ON p.id = CAST(udp.person_id AS TEXT)
             WHERE udp.user_id = CAST(:id AS UUID)
             ORDER BY udp.preference_order ASC
         '''), {'id': owner_id})
@@ -268,7 +268,7 @@ class UserService:
         actors_res = await self.db.execute(text('''
             SELECT p.name 
             FROM user_actor_preferences uap
-            JOIN persons p ON CAST(p.id AS TEXT) = uap.person_id
+            JOIN persons p ON p.id = CAST(uap.person_id AS TEXT)
             WHERE uap.user_id = CAST(:id AS UUID)
             ORDER BY uap.preference_order ASC
         '''), {'id': user_id})
@@ -278,7 +278,7 @@ class UserService:
         directors_res = await self.db.execute(text('''
             SELECT p.name 
             FROM user_director_preferences udp
-            JOIN persons p ON CAST(p.id AS TEXT) = udp.person_id
+            JOIN persons p ON p.id = CAST(udp.person_id AS TEXT)
             WHERE udp.user_id = CAST(:id AS UUID)
             ORDER BY udp.preference_order ASC
         '''), {'id': user_id})
