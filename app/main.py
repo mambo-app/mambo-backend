@@ -17,7 +17,7 @@ from app.middleware.rate_limit import RateLimitMiddleware
 # Initialize structured logging before anything else
 configure_logging(level='DEBUG' if not settings.is_production else 'INFO')
 
-from app.routes.v1 import auth, users, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media
+# from app.routes.v1 import auth, users, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media
 
 # if settings.sentry_dsn:
 #     import sentry_sdk
@@ -122,41 +122,40 @@ app.add_middleware(
 register_exception_handlers(app)
 
 # Routes
-app.include_router(auth.router,          prefix='/v1/auth')
-app.include_router(users.router,         prefix='/v1/users')
-app.include_router(reviews.router,       prefix='/v1/reviews')
-app.include_router(posts.router,         prefix='/v1/posts')
-app.include_router(feed.router,          prefix='/v1/feed')
-app.include_router(notifications.router, prefix='/v1/notifications')
-app.include_router(home.router,          prefix='/v1/home')
-app.include_router(discover.router,      prefix='/v1/discover')
-app.include_router(content.router,       prefix='/v1/content')
-app.include_router(news.router,          prefix='/v1/news')
-app.include_router(chat.router,          prefix='/v1/chat')
-app.include_router(reports.router,       prefix='/v1/reports')
-app.include_router(collections.router,   prefix='/v1/collections')
-app.include_router(recommendations.router, prefix='/v1/recommendations')
-app.include_router(social.router,          prefix='/v1/social')
-app.include_router(admin.router,         prefix='/v1/admin')
-app.include_router(media.router,         prefix='/v1/media')
+# app.include_router(auth.router,          prefix='/v1/auth')
+# app.include_router(users.router,         prefix='/v1/users')
+# app.include_router(reviews.router,       prefix='/v1/reviews')
+# app.include_router(posts.router,         prefix='/v1/posts')
+# app.include_router(feed.router,          prefix='/v1/feed')
+# app.include_router(notifications.router, prefix='/v1/notifications')
+# app.include_router(home.router,          prefix='/v1/home')
+# app.include_router(discover.router,      prefix='/v1/discover')
+# app.include_router(content.router,       prefix='/v1/content')
+# app.include_router(news.router,          prefix='/v1/news')
+# app.include_router(chat.router,          prefix='/v1/chat')
+# app.include_router(reports.router,       prefix='/v1/reports')
+# app.include_router(collections.router,   prefix='/v1/collections')
+# app.include_router(recommendations.router, prefix='/v1/recommendations')
+# app.include_router(social.router,          prefix='/v1/social')
+# app.include_router(admin.router,         prefix='/v1/admin')
+# app.include_router(media.router,         prefix='/v1/media')
 
-# Backward-compatible aliases (no /v1 prefix)
-# Handles apps built with base URL missing the /v1 path
-app.include_router(auth.router,          prefix='/auth')
-app.include_router(users.router,         prefix='/users')
-app.include_router(reviews.router,       prefix='/reviews')
-app.include_router(posts.router,         prefix='/posts')
-app.include_router(feed.router,          prefix='/feed')
-app.include_router(notifications.router, prefix='/notifications')
-app.include_router(home.router,          prefix='/home')
-app.include_router(discover.router,      prefix='/discover')
-app.include_router(content.router,       prefix='/content')
-app.include_router(news.router,          prefix='/news')
-app.include_router(chat.router,          prefix='/chat')
-app.include_router(collections.router,   prefix='/collections')
-app.include_router(recommendations.router, prefix='/recommendations')
-app.include_router(social.router,        prefix='/social')
-app.include_router(media.router,         prefix='/media')
+# Backward-compatible aliases
+# app.include_router(auth.router,          prefix='/auth')
+# app.include_router(users.router,         prefix='/users')
+# app.include_router(reviews.router,       prefix='/reviews')
+# app.include_router(posts.router,         prefix='/posts')
+# app.include_router(feed.router,          prefix='/feed')
+# app.include_router(notifications.router, prefix='/notifications')
+# app.include_router(home.router,          prefix='/home')
+# app.include_router(discover.router,      prefix='/discover')
+# app.include_router(content.router,       prefix='/content')
+# app.include_router(news.router,          prefix='/news')
+# app.include_router(chat.router,          prefix='/chat')
+# app.include_router(collections.router,   prefix='/collections')
+# app.include_router(recommendations.router, prefix='/recommendations')
+# app.include_router(social.router,        prefix='/social')
+# app.include_router(media.router,         prefix='/media')
 
 
 @app.api_route("/", methods=["GET", "HEAD"])
