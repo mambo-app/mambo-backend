@@ -10,7 +10,7 @@ engine = create_async_engine(
     pool_size=15,
     max_overflow=5,
     pool_timeout=60,
-    pool_pre_ping=False, # Disable pre-ping for speed
+    pool_pre_ping=True, # Stabilize connection health
     pool_recycle=600,
     echo=False,
     # Disable prepared statement caching to prevent stale plan errors

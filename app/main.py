@@ -2,7 +2,7 @@
 # from sentry_sdk.integrations.fastapi import FastApiIntegration
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse, Response
+from fastapi.responses import JSONResponse, Response
 from contextlib import asynccontextmanager
 
 from app.core.config import settings
@@ -104,7 +104,8 @@ app = FastAPI(
     version='1.0.0',
     docs_url='/docs' if not settings.is_production else None,
     lifespan=lifespan,
-    default_response_class=ORJSONResponse,
+    # Standard JSONResponse is more stable and faster in FastAPI 0.100+
+    default_response_class=JSONResponse,
 )
 
 # Middleware
@@ -161,6 +162,7 @@ app.include_router(media.router,         prefix='/media')
 
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
+    print(">>> PING RECEIVED: /")
     return {
         "message": "Welcome to Mambo API",
         "version": "1.0.0",
@@ -171,6 +173,7 @@ async def root():
 @app.api_route('/health', methods=['GET', 'HEAD'])
 async def health():
     """Lightweight health check for Render/Cloudflare liveness probes."""
+    print(">>> PING RECEIVED: /health")
     return {
         'status': 'ok',
         'env': settings.app_env,
