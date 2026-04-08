@@ -50,11 +50,12 @@ async def lifespan(app: FastAPI):
 
     # 2. Define background startup tasks
     async def run_global_healing():
+        await asyncio.sleep(1200) # Start 20 minutes after boot
         # Temporarily skipping healing as well to ensure clean start
         pass
 
     async def run_news_scheduler():
-        await asyncio.sleep(5)  # Short delay to allow port binding
+        await asyncio.sleep(120)  # Start 2 minutes after boot
         while True:
             try:
                 logger.info("Starting background news fetch cycle")
@@ -67,7 +68,7 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(6 * 3600)  # 6 hours
 
     async def run_content_cleanup_scheduler():
-        await asyncio.sleep(5)  # Short delay to allow port binding
+        await asyncio.sleep(600)  # Start 10 minutes after boot
         from app.services.content_service import ContentService
         while True:
             try:
@@ -82,20 +83,20 @@ async def lifespan(app: FastAPI):
                 logger.error(f"Content cleanup scheduler error: {e}")
             await asyncio.sleep(12 * 3600)  # 12 hours
             
-    # scheduler_task = asyncio.create_task(run_news_scheduler())
-    # cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
-    # healing_task = asyncio.create_task(run_global_healing())
+    scheduler_task = asyncio.create_task(run_news_scheduler())
+    cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
+    healing_task = asyncio.create_task(run_global_healing())
     
     yield
     
     # Cleanup
-    # try:
-    #     scheduler_task.cancel()
-    #     cleanup_task.cancel()
-    #     healing_task.cancel()
-    #     await asyncio.gather(scheduler_task, cleanup_task, healing_task, return_exceptions=True)
-    # except Exception:
-    #     pass
+    try:
+        scheduler_task.cancel()
+        cleanup_task.cancel()
+        healing_task.cancel()
+        await asyncio.gather(scheduler_task, cleanup_task, healing_task, return_exceptions=True)
+    except Exception:
+        pass
     await engine.dispose()
 
 app = FastAPI(
