@@ -127,11 +127,10 @@ class NewsService:
                             import re
                             content = re.sub(r'\s*\[\+\d+ chars\]\s*$', '', content)
                             
-                            # If content is short, try scraping
-                            if len(content) < 300:
-                                scraped = await extract_full_text(article['url'])
-                                if len(scraped) > len(content):
-                                    content = scraped
+                            # Disable scraping for now to save server memory
+                            # scraped = await extract_full_text(article['url'])
+                            # if len(scraped) > len(content):
+                            #     content = scraped
 
                             async with self.db.begin_nested():
                                 await self.db.execute(text('''

@@ -7,11 +7,11 @@ DATABASE_URL = settings.database_pool_url.replace(
 
 engine = create_async_engine(
     DATABASE_URL,
-    pool_size=10,
-    max_overflow=5,
+    pool_size=5,
+    max_overflow=15,
     pool_timeout=60,
     pool_pre_ping=True,
-    pool_recycle=1800,
+    pool_recycle=600,
     echo=False,
     # Disable prepared statement caching to prevent stale plan errors
     # after ALTER TABLE schema changes (InvalidCachedStatementError)

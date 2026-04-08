@@ -15,7 +15,7 @@ from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
 
 # Initialize structured logging before anything else
-configure_logging(level='DEBUG' if not settings.is_production else 'INFO')
+configure_logging(level='INFO')
 
 from app.routes.v1 import auth, users, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media
 
