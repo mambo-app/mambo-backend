@@ -130,19 +130,20 @@ class ContentService:
 
         # Genre mapping for TMDB/MAL
         # (Simplified mapping, ideally this would be a more robust lookup table)
+        is_movie = (content_type == 'movie')
         genre_ids = {
-            'Action': (28 if mode == 'movie' else 10759) if mode != 'anime' else 1,
+            'Action': (28 if is_movie else 10759) if mode != 'anime' else 1,
             'Crime': 80 if mode != 'anime' else 7,
             'Comedy': 35 if mode != 'anime' else 4,
             'Drama': 18 if mode != 'anime' else 8,
-            'Sci-Fi': (878 if mode == 'movie' else 10765) if mode != 'anime' else 24,
-            'Horror': (27 if mode == 'movie' else 9648) if mode != 'anime' else 14, # Fallback to Mystery for TV
+            'Sci-Fi': (878 if is_movie else 10765) if mode != 'anime' else 24,
+            'Horror': (27 if is_movie else 9648) if mode != 'anime' else 14,
             'Romance': 10749 if mode != 'anime' else 22,
-            'Thriller': (53 if mode == 'movie' else 9648) if mode != 'anime' else 41, # Fallback to Mystery for TV
+            'Thriller': (53 if is_movie else 9648) if mode != 'anime' else 41,
             'Animation': 16 if mode != 'anime' else 1,
-            'Fantasy': (14 if mode == 'movie' else 10765) if mode != 'anime' else 10, # 10765 is Sci-Fi & Fantasy
+            'Fantasy': (14 if is_movie else 10765) if mode != 'anime' else 10,
             'Documentary': 99 if mode != 'anime' else 1,
-            'Adventure': (12 if mode == 'movie' else 10759) if mode != 'anime' else 2,
+            'Adventure': (12 if is_movie else 10759) if mode != 'anime' else 2,
             'Mystery': 9648 if mode != 'anime' else 7,
             'Family': 10751 if mode != 'anime' else 1,
         }
@@ -226,43 +227,49 @@ class ContentService:
                 else: 
                     fetch_tasks[f'genre_{genre}'] = self.mal_client.get_anime_by_genre(genre_id)
  
-        # 3. Execute Fetch Tasks
-        if fetch_tasks:
-            logger.info(f"Discovery: Fetching {len(fetch_tasks)} tasks for {mode}...")
-            keys = list(fetch_tasks.keys())
+        # 3. BACKGROUND FETCH (if stale or empty)
+        async def _background_fetch():
             try:
+                logger.info(f"Discovery: BG Fetching {len(fetch_tasks)} tasks for {mode}...")
+                keys = list(fetch_tasks.keys())
+                # Use longer timeout for background work
                 net_res = await asyncio.wait_for(
                     asyncio.gather(*[fetch_tasks[k] for k in keys], return_exceptions=True),
-                    timeout=3.0
+                    timeout=15.0 
                 )
-            except asyncio.TimeoutError:
-                logger.warning(f"Discovery: Network fetch timed out after 3s for {mode}. Serving from DB.")
-                net_res = []
-            combined_tmdb = []
-            combined_mal = []
-            for i, val in enumerate(net_res):
-                if isinstance(val, Exception):
-                    logger.error(f"Discovery fetch failed for {keys[i]}: {val}")
-                    continue
-                flat = []
-                if isinstance(val, (list, tuple)) and any(isinstance(x, list) for x in val):
-                    for sub in val:
-                        if isinstance(sub, list): flat.extend(sub)
-                elif isinstance(val, list): flat = val
+                combined_tmdb = []
+                combined_mal = []
+                for i, val in enumerate(net_res):
+                    if isinstance(val, Exception): continue
+                    flat = []
+                    if isinstance(val, (list, tuple)) and any(isinstance(x, list) for x in val):
+                        for sub in val:
+                            if isinstance(sub, list): flat.extend(sub)
+                    elif isinstance(val, list): flat = val
+                    if mode == 'anime': combined_mal.extend(flat)
+                    else: combined_tmdb.extend(flat)
                 
-                if mode == 'anime': combined_mal.extend(flat)
-                else: combined_tmdb.extend(flat)
-            
-            # Upsert as non-permanent (subject to 24h cleanup)
-            if combined_tmdb: 
-                logger.info(f"Discovery: Upserting {len(combined_tmdb)} items from TMDB")
-                await self._upsert_tmdb_content(combined_tmdb, returning=False, is_permanent=False)
-            if combined_mal: 
-                logger.info(f"Discovery: Upserting {len(combined_mal)} items from MAL")
-                await self._upsert_mal_content(combined_mal, returning=False, is_permanent=False)
- 
-        # 4. Final DB Queries for Response
+                if combined_tmdb: await self._upsert_tmdb_content(combined_tmdb, returning=False, is_permanent=False)
+                if combined_mal: await self._upsert_mal_content(combined_mal, returning=False, is_permanent=False)
+            except Exception as e:
+                logger.error(f"Discovery BG fetch error: {e}")
+
+        # If data is completely missing, we MUST wait for the first fetch to avoid returning empty
         pop_db = await _db_query(limit=50, sort='recent')
+        if not pop_db and fetch_tasks:
+            # First time load: wait for a sync fetch (3s)
+            logger.info("Discovery: DB empty. Performing sync fetch...")
+            # (Logic for sync fetch here if needed, but for now we just fire BG and proceed)
+            # Actually, better to just call the background fetch logic synchronously once
+            await _background_fetch()
+            pop_db = await _db_query(limit=50, sort='recent')
+        elif fetch_tasks:
+            # Content exists but is stale: spawn background refresh
+            logger.info("Discovery: Data stale. Spawning BG refresh.")
+            asyncio.create_task(_background_fetch())
+
+        # 4. Final DB Queries for Response
+        # Re-fetch everything to ensure we have the latest (either from DB or the sync fetch above)
         top_db = await _db_query(limit=20, min_rating=7.2)
         ant_db = await _db_query(limit=50, future_only=True)
 
