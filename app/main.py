@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
         pass
 
     async def run_news_scheduler():
-        await asyncio.sleep(60)  # Startup delay to pass health checks
+        await asyncio.sleep(5)  # Short delay to allow port binding
         while True:
             try:
                 logger.info("Starting background news fetch cycle")
@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(6 * 3600)  # 6 hours
 
     async def run_content_cleanup_scheduler():
-        await asyncio.sleep(60)  # Startup delay to pass health checks
+        await asyncio.sleep(5)  # Short delay to allow port binding
         from app.services.content_service import ContentService
         while True:
             try:
@@ -174,10 +174,11 @@ async def health():
     db_status = 'ok'
     try:
         async for db in _get_db():
+            # Use a very fast check
             await db.execute(_text('SELECT 1'))
             break
-    except Exception:
-        db_status = 'down'
+    except Exception as e:
+        db_status = f'down: {str(e)}'
 
     return {
         'status': 'ok' if db_status == 'ok' else 'degraded',
