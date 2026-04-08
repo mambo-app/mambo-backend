@@ -38,21 +38,16 @@ async def lifespan(app: FastAPI):
 
     logger = logging.getLogger('mambo.scheduler')
 
-    # 1. Run critical schema initialization (MUST be sync)
-    from app.core.init_db import init_db, init_db_data_healing
-    async with AsyncSessionLocal() as db:
-        logger.info("Initializing critical schemas at startup")
-        await init_db(db)
+    # 1. Temporarily disabling schema init to bypass Render timeouts/locks
+    # from app.core.init_db import init_db, init_db_data_healing
+    # async with AsyncSessionLocal() as db:
+    #     logger.info("Initializing critical schemas at startup")
+    #     await init_db(db)
 
     # 2. Define background startup tasks
     async def run_global_healing():
-        # Wait a bit for server to settle
-        await asyncio.sleep(10)
-        try:
-            async with AsyncSessionLocal() as db:
-                await init_db_data_healing(db)
-        except Exception as e:
-            logger.error(f"Global healing error: {e}")
+        # Temporarily skipping healing as well to ensure clean start
+        pass
 
     async def run_news_scheduler():
         while True:
