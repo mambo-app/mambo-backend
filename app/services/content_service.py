@@ -18,23 +18,32 @@ class ContentService:
         self.tmdb_client = TMDBClient()
         self.mal_client = MALClient()
 
-    def _map_to_response(self, db_list: List[Dict[str, Any]]) -> List[Any]:
+    def _map_to_response(self, db_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         results = []
         today = date.today()
         for d in db_list:
-            rd = d.get('release_date')
-            d['is_anticipated'] = bool(rd and rd > today)
-            d['avg_star_rating'] = self._get_display_rating(d)
-            d['cast'] = d.get('cast', [])
-            
-            # Use raw dictionary if it's already one, but try to validate for safety
-            # If validation fails, we return the dict anyway to avoid blank screens
             try:
-                results.append(ContentResponse.model_validate(d))
+                # 1. Prepare computed fields
+                rd = d.get('release_date')
+                d['is_anticipated'] = bool(rd and rd > today)
+                d['avg_star_rating'] = self._get_display_rating(d)
+                d['cast'] = d.get('cast', [])
+                
+                # 2. Validate with Pydantic for schema correctness
+                model = ContentResponse.model_validate(d)
+                
+                # 3. Convert back to dict and ensure ID is a string for the App
+                safe_dict = model.model_dump()
+                safe_dict['id'] = str(safe_dict['id'])
+                if safe_dict.get('release_date'):
+                    safe_dict['release_date'] = safe_dict['release_date'].isoformat()
+                
+                results.append(safe_dict)
             except Exception as e:
-                logger.warning(f"Validation skipped for {d.get('id')}: {e}")
-                # Fallback: ensure necessary fields for the App are present as strings/basic types
-                results.append(d) 
+                logger.warning(f"Map failed for {d.get('id')}: {e}")
+                # Ultimate fallback: Raw dict with string ID
+                if 'id' in d: d['id'] = str(d['id'])
+                results.append(d)
         return results
 
     async def get_home_trending(self, user_id: Optional[str] = None) -> HomeTrendingResponse:
@@ -106,8 +115,8 @@ class ContentService:
         from datetime import date
         from app.services.cache_service import CacheKeys, cache, CacheService
         
-        # 0. Cache Check
-        cache_key = CacheKeys.discover(mode, user_id if user_id else "guest", date.today().isoformat())
+        # 1. Query Cache (Bust with v2 prefix)
+        cache_key = f"v2:{CacheKeys.discover(mode, user_id if user_id else 'guest', date.today().isoformat())}"
         cached = await cache.get(cache_key)
         if cached:
             # Hydrate user-specific status even on cache hits
