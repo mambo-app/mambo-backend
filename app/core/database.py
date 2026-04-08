@@ -7,8 +7,8 @@ DATABASE_URL = settings.database_pool_url.replace(
 
 engine = create_async_engine(
     DATABASE_URL,
-    pool_size=5,
-    max_overflow=10,
+    pool_size=20,
+    max_overflow=20,
     pool_timeout=30,
     pool_pre_ping=True,
     pool_recycle=1800,
