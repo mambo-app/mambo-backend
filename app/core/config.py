@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     app_env: str = 'development'
     invite_key: str = 'B3G1N'
     admin_secret: str = 'CHANGE_ME_IN_PRODUCTION'
-    allowed_origins: str = 'http://localhost:3000'
+    allowed_origins: str = '*'
 
     @property
     def origins_list(self) -> list[str]:
