@@ -27,6 +27,7 @@ def verify_supabase_jwt(token: str) -> dict:
                 signing_key.key,
                 algorithms=[alg],
                 options={'verify_aud': False},
+                leeway=60,
             )
         else:
             # Symmetric path: verify using the shared JWT secret (HS256)
@@ -35,6 +36,7 @@ def verify_supabase_jwt(token: str) -> dict:
                 settings.supabase_jwt_secret,
                 algorithms=['HS256'],
                 options={'verify_aud': False},
+                leeway=60,
             )
 
         return payload
