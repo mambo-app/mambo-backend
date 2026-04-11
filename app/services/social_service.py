@@ -236,8 +236,37 @@ class SocialService:
 
         return await self.repo.get_reviews_by_user(user_id, limit, offset)
 
-    async def create_review(self, user_id: UUID, content_id: UUID, star_rating: float, text_review: str | None = None, contains_spoiler: bool = False, tags: list[str] = []) -> dict:
-        # 1. Create review
+    async def create_review(self, user_id: UUID, content_id: UUID, star_rating: float, text_review: str, contains_spoiler: bool = False, tags: list[str] = []) -> dict:
+        # 1. Enforce mandatory text
+        if not text_review or not text_review.strip():
+            raise HTTPException(status_code=400, detail="Review text is mandatory. Use 'Rate' for star-only ratings.")
+
+        # 2. Find the most recent watch session to link
+        # If one exists within a reasonable window (e.g. 1 hour) and has no review, we link it.
+        # Otherwise, we create a new watch event.
+        from app.services.action_service import ActionService
+        from app.models.action import ActionType
+        action_svc = ActionService(self.db)
+
+        session_res = await self.db.execute(text('''
+            SELECT id FROM watch_history 
+            WHERE user_id = :uid AND content_id = :cid 
+            ORDER BY watched_at DESC LIMIT 1
+        '''), {'uid': user_id, 'cid': content_id})
+        latest_session = session_res.mappings().one_or_none()
+        
+        watch_history_id = None
+        if latest_session:
+            watch_history_id = latest_session['id']
+            # Update the rating for this session to match the review
+            await self.db.execute(text('''
+                UPDATE watch_history SET rating = :r WHERE id = :wid
+            '''), {'r': star_rating, 'wid': watch_history_id})
+        else:
+            # Create a new session if none found
+            watch_history_id = await action_svc._handle_watch(user_id, content_id, ActionType.watch)
+
+        # 3. Create review record
         review = await self.repo.create_review(
             user_id=user_id,
             content_id=content_id,
@@ -246,29 +275,25 @@ class SocialService:
             is_spoiler=contains_spoiler
         )
 
-        # 2. Automatic watch/rewatch logic
-        from app.services.action_service import ActionService
-        from app.models.action import ActionType
-        action_svc = ActionService(self.db)
+        # 4. Link the session to the review
+        await self.db.execute(text('''
+            UPDATE reviews SET watch_history_id = :wid WHERE id = :rid
+        '''), {'wid': watch_history_id, 'rid': review['id']})
         
-        # Trigger watch logic
-        await action_svc._handle_watch(user_id, content_id, ActionType.watch)
-        # Sync to Watched collection
-        await action_svc._sync_to_collection(user_id, content_id, 'Watched')
+        await self.db.execute(text('''
+            UPDATE watch_history SET review_id = :rid WHERE id = :wid
+        '''), {'rid': review['id'], 'wid': watch_history_id})
 
-        # 3. Log activity for the review itself
-        # Change type based on whether text was provided as requested
-        activity_type = 'reviewed' if text_review and text_review.strip() else 'rated'
-        
+        # 5. Log activity (Always 'reviewed' here because text is mandatory)
         await action_svc._log_activity(
             user_id=user_id,
-            activity_type=activity_type,
+            activity_type='reviewed',
             content_id=content_id,
             review_id=review['id'],
             details={'rating': star_rating}
         )
 
-        # 4. Update user stats
+        # 6. Update user stats
         await self.db.execute(text('''
             INSERT INTO user_stats (user_id, total_reviews)
             VALUES (:user_id, 1)
@@ -277,7 +302,7 @@ class SocialService:
                 updated_at = now()
         '''), {'user_id': user_id})
 
-        # Invalidate profile cache to reflect new review count
+        # Invalidate profile cache
         from app.services.user_service import UserService
         u_svc = UserService(self.db)
         await u_svc.invalidate_profile_cache(str(user_id))
@@ -287,6 +312,18 @@ class SocialService:
 
     async def get_trending_reviews(self, limit: int = 5) -> list[dict]:
         return await self.repo.get_trending_reviews(limit)
+
+    async def get_review_of_the_day(self) -> dict | None:
+        """Picks a random trending review that changes every 24 hours."""
+        from datetime import datetime
+        trending = await self.repo.get_trending_reviews(limit=10)
+        if not trending:
+            return None
+            
+        # Daily seed: days since epoch
+        seed = int(datetime.now().timestamp() // 86400)
+        index = seed % len(trending)
+        return trending[index]
 
     async def get_content_reviews(self, content_id: UUID, limit: int = 20, offset: int = 0) -> list[dict]:
         return await self.repo.get_reviews_by_content(content_id, limit, offset)

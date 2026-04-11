@@ -19,6 +19,14 @@ async def get_trending_reviews(
     items = await service.get_trending_reviews(limit)
     return ok({"items": items})
 
+@router.get('/of-the-day', response_model=Dict[str, Any])
+async def get_review_of_the_day(
+    db: AsyncSession = Depends(get_db)
+):
+    service = SocialService(db)
+    item = await service.get_review_of_the_day()
+    return ok({"item": item})
+
 @router.post('/', response_model=Dict[str, Any])
 async def create_review(
     req: ReviewCreateRequest,

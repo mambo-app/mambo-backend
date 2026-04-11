@@ -67,3 +67,19 @@ async def get_similar_content(
     similar = await service.get_similar_content(content_id)
     from app.models.common import ok
     return ok(similar)
+
+@router.get('/{content_id}/rating-history')
+async def get_content_rating_history(
+    content_id: UUID,
+    tab: str = 'all',
+    limit: int = 20,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id_optional)
+):
+    from app.services.action_service import ActionService
+    from app.models.common import ok
+    service = ActionService(db)
+    vid = UUID(user_id) if user_id else None
+    items = await service.get_content_rating_history(content_id, viewer_id=vid, tab=tab, limit=limit, offset=offset)
+    return ok(items)

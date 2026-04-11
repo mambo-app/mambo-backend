@@ -3,7 +3,7 @@ import html
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from app.core.config import settings
-from app.core.logging import get_logger
+from app.core.logger import get_logger
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any
 

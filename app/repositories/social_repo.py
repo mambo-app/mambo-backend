@@ -327,7 +327,7 @@ class SocialRepository(BaseRepository):
 
     async def get_review(self, review_id: UUID) -> dict | None:
         return await self.fetch_one('''
-            SELECT r.*, pr.username, pr.avatar_url, pr.is_verified
+            SELECT r.*, r.rating as star_rating, pr.username, pr.avatar_url, pr.is_verified
             FROM reviews r
             JOIN profiles pr ON pr.id = r.user_id
             WHERE r.id = :id AND r.is_deleted = false
@@ -335,17 +335,43 @@ class SocialRepository(BaseRepository):
 
     async def get_reviews_by_user(self, user_id: UUID, limit: int = 20, offset: int = 0) -> list[dict]:
         return await self.fetch_many('''
-            SELECT r.*, 
-                   r.rating as star_rating, 
-                   r.is_spoiler as contains_spoiler,
-                   pr.username, pr.avatar_url, pr.is_verified,
-                   c.title as content_title, 
-                   c.poster_url as content_poster
-            FROM reviews r
-            JOIN profiles pr ON pr.id = r.user_id
-            LEFT JOIN content c ON c.id = r.content_id
-            WHERE r.user_id = :user_id AND r.is_deleted = false
-            ORDER BY r.created_at DESC
+            (
+                SELECT r.id, r.user_id, r.content_id, r.rating, r.text_review, r.is_spoiler, r.created_at,
+                       r.rating as star_rating, 
+                       r.is_spoiler as contains_spoiler,
+                       pr.username, pr.avatar_url, pr.is_verified,
+                       c.title as content_title, 
+                       c.poster_url as content_poster,
+                       'review' as item_type,
+                       r.likes_count, r.comments_count
+                FROM reviews r
+                JOIN profiles pr ON pr.id = r.user_id
+                LEFT JOIN content c ON c.id = r.content_id
+                WHERE r.user_id = :user_id AND r.is_deleted = false
+            )
+            UNION ALL
+            (
+                SELECT wh.id, wh.user_id, wh.content_id, wh.rating, NULL as text_review, false as is_spoiler, wh.watched_at as created_at,
+                       wh.rating as star_rating,
+                       false as contains_spoiler,
+                       pr.username, pr.avatar_url, pr.is_verified,
+                       c.title as content_title,
+                       c.poster_url as content_poster,
+                       'rating' as item_type,
+                       0 as likes_count, 0 as comments_count
+                FROM watch_history wh
+                JOIN profiles pr ON pr.id = wh.user_id
+                LEFT JOIN content c ON c.id = wh.content_id
+                WHERE wh.user_id = :user_id 
+                AND wh.rating IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM reviews r 
+                    WHERE r.user_id = wh.user_id 
+                    AND r.content_id = wh.content_id 
+                    AND r.is_deleted = false
+                )
+            )
+            ORDER BY created_at DESC
             LIMIT :limit OFFSET :offset
         ''', {'user_id': user_id, 'limit': limit, 'offset': offset})
 

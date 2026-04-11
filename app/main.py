@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.core.database import engine
 from app.core.exceptions import register_exception_handlers
-from app.core.logging import configure_logging
+from app.core.logger import configure_logging, get_logger
 from app.middleware.request_id import RequestIDMiddleware
 from app.middleware.timing import TimingMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware

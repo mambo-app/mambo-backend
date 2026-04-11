@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_user_id
@@ -56,3 +56,18 @@ async def get_upload_url(
         "bucket": bucket,
         "public_url": f"{settings.supabase_url}/storage/v1/object/public/{bucket}/{path}"
     })
+
+@router.post('/upload')
+async def upload_media(
+    file: UploadFile = File(...),
+    bucket: str = Query('post-media', description="Supabase bucket name"),
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Directly upload a file to the specified bucket and return the public URL.
+    """
+    from app.services.media_service import MediaService
+    content = await file.read()
+    public_url = await MediaService.upload_post_media(user_id, content, file.filename)
+    return ok({"public_url": public_url})

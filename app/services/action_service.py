@@ -1,4 +1,4 @@
-from app.core.logging import get_logger
+from app.core.logger import get_logger
 from uuid import UUID
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -141,6 +141,57 @@ class ActionService:
             'flag_value': flag_value
         })
 
+    async def get_content_rating_history(self, content_id: UUID, viewer_id: Optional[UUID] = None, tab: str = 'all', limit: int = 50, offset: int = 0):
+        """
+        Fetches community rating history for a content item.
+        Tabs: 'all', 'friends', 'you'
+        """
+        params = {"cid": content_id, "limit": limit, "offset": offset}
+        
+        base_query = '''
+            SELECT 
+                wh.id, wh.rating, wh.watched_at, wh.watch_type,
+                p.id as user_id, p.username, p.display_name, p.avatar_url, p.is_verified
+            FROM watch_history wh
+            JOIN profiles p ON wh.user_id = p.id
+            WHERE wh.content_id = :cid AND wh.rating IS NOT NULL
+        '''
+
+        if tab == 'you' and viewer_id:
+            base_query += " AND wh.user_id = :vid"
+            params["vid"] = viewer_id
+        elif tab == 'friends' and viewer_id:
+            base_query += '''
+                AND wh.user_id IN (
+                    SELECT receiver_id FROM friend_requests WHERE sender_id = :vid AND status = 'accepted'
+                    UNION
+                    SELECT sender_id FROM friend_requests WHERE receiver_id = :vid AND status = 'accepted'
+                )
+            '''
+            params["vid"] = viewer_id
+
+        base_query += " ORDER BY wh.watched_at DESC LIMIT :limit OFFSET :offset"
+        
+        res = await self.db.execute(text(base_query), params)
+        return res.mappings().all()
+
+    async def get_user_watch_history(self, user_id: UUID, limit: int = 50, offset: int = 0):
+        """
+        Fetches a user's lifelong watch and rating history.
+        """
+        query = '''
+            SELECT 
+                wh.id, wh.rating, wh.watched_at, wh.watch_type,
+                c.id as content_id, c.title, c.poster_url, c.content_type
+            FROM watch_history wh
+            JOIN content c ON wh.content_id = c.id
+            WHERE wh.user_id = :uid
+            ORDER BY wh.watched_at DESC
+            LIMIT :limit OFFSET :offset
+        '''
+        res = await self.db.execute(text(query), {"uid": user_id, "limit": limit, "offset": offset})
+        return res.mappings().all()
+
     async def _handle_watch(self, user_id: UUID, content_id: UUID, action: ActionType):
         # 1. Fetch current watch count to decide activity type
         status_res = await self.db.execute(text(
@@ -167,16 +218,19 @@ class ActionService:
         ''')
         await self.db.execute(stmt_status, {'user_id': user_id, 'content_id': content_id, 'init_count': init_count})
 
-        # 3. Add to history
+        # 3. Add to history (ALWAYS INSERT NEW)
         watch_type = 'first_watch' if old_count == 0 else 'rewatch'
         stmt_history = text('''
-            INSERT INTO watch_history (user_id, content_id, watch_type, watched_at)
-            VALUES (:user_id, :content_id, :watch_type, now())
-            ON CONFLICT (user_id, content_id) DO UPDATE SET 
-                watch_type = EXCLUDED.watch_type,
-                watched_at = EXCLUDED.watched_at
+            INSERT INTO watch_history (id, user_id, content_id, watch_type, watched_at)
+            VALUES (:id, :user_id, :content_id, :watch_type, now())
+            RETURNING id
         ''')
-        await self.db.execute(stmt_history, {'user_id': user_id, 'content_id': content_id, 'watch_type': watch_type})
+        watch_id = (await self.db.execute(stmt_history, {
+            'id': uuid.uuid4(),
+            'user_id': user_id, 
+            'content_id': content_id, 
+            'watch_type': watch_type
+        })).scalar()
 
         # 4. Update stats
         await self.db.execute(text('''
@@ -199,7 +253,7 @@ class ActionService:
         await self._log_activity(user_id, activity_type, content_id=content_id)
 
     async def _handle_rate(self, user_id: UUID, content_id: UUID, rating: float):
-        # 1. Update status flag and rating
+        # 1. Update status flag and rating (Latest Status)
         stmt = text('''
             INSERT INTO user_content_status (user_id, content_id, rating, updated_at)
             VALUES (:user_id, :content_id, :rating, now())
@@ -209,12 +263,32 @@ class ActionService:
         ''')
         await self.db.execute(stmt, {'user_id': user_id, 'content_id': content_id, 'rating': rating})
         
-        # 2. Log activity
+        # 2. Update the MOST RECENT watch history entry with this rating
+        # This handles the "Late Rating" logic.
+        await self.db.execute(text('''
+            UPDATE watch_history 
+            SET rating = :rating 
+            WHERE id = (
+                SELECT id FROM watch_history 
+                WHERE user_id = :uid AND content_id = :cid 
+                ORDER BY watched_at DESC LIMIT 1
+            )
+        '''), {'uid': user_id, 'cid': content_id, 'rating': rating})
+
+        # 3. Log activity
+        # Check if this content was already watched (to decide if rewatch badge)
+        status_res = await self.db.execute(text(
+            "SELECT watch_count FROM user_content_status WHERE user_id = :uid AND content_id = :cid"
+        ), {"uid": user_id, "cid": content_id})
+        old_count = (status_res.mappings().one_or_none() or {}).get('watch_count', 0)
+        is_rewatch = old_count > 1
+
         await self._log_activity(
             user_id=user_id, 
             activity_type='rated', 
             content_id=content_id,
-            details={'rating': rating}
+            details={'rating': rating},
+            is_rewatch=is_rewatch
         )
         
         # 3. Invalidate cache
@@ -258,13 +332,13 @@ class ActionService:
                           review_id: Optional[UUID] = None, post_id: Optional[UUID] = None, 
                           collection_id: Optional[UUID] = None, news_id: Optional[UUID] = None, 
                           related_user_id: Optional[UUID] = None, details: Optional[dict] = None,
-                          visibility: str = 'public'):
+                          visibility: str = 'public', is_rewatch: bool = False):
         import json
         stmt = text('''
             INSERT INTO activity_log (id, user_id, activity_type, content_id, review_id, post_id, 
-                                   collection_id, news_id, related_user_id, details, visibility)
+                                   collection_id, news_id, related_user_id, details, visibility, is_rewatch)
             VALUES (:id, :user_id, :activity_type, :content_id, :review_id, :post_id, 
-                    :collection_id, :news_id, :related_user_id, :details, :visibility)
+                    :collection_id, :news_id, :related_user_id, :details, :visibility, :is_rewatch)
         ''')
         await self.db.execute(stmt, {
             'id': uuid.uuid4(),
@@ -277,7 +351,8 @@ class ActionService:
             'news_id': news_id,
             'related_user_id': related_user_id,
             'details': json.dumps(details) if details else None,
-            'visibility': visibility
+            'visibility': visibility,
+            'is_rewatch': is_rewatch
         })
 
     async def _revert_watch(self, user_id: UUID, content_id: UUID):

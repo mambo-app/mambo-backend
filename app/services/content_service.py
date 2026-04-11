@@ -7,7 +7,7 @@ from uuid import UUID
 from app.services.tmdb_client import TMDBClient
 from app.services.mal_client import MALClient
 from app.models.content import ContentResponse, HomeTrendingResponse
-from app.core.logging import get_logger
+from app.core.logger import get_logger
 from app.services.cache_service import cache, CacheKeys, CacheService
 
 logger = get_logger('mambo.content')

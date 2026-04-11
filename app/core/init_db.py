@@ -2,6 +2,7 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('mambo.db_init')
 
 async def init_db(db: AsyncSession):
@@ -249,11 +250,35 @@ async def init_db(db: AsyncSession):
     await add_col("curated_content", "link_url",     "TEXT")
     await add_col("curated_content", "content_id",   "UUID")
 
+    # [REWATCH SUPPORT] Remove unique constraint on watch_history (user_id, content_id)
+    # This allows multiple "Watch" events for the same content.
+    try:
+        # 1. Drop the composite primary key
+        await db.execute(text("ALTER TABLE public.watch_history DROP CONSTRAINT IF EXISTS watch_history_pkey"))
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"watch_history pkey drop: {e}")
+        await db.rollback()
+
+    await add_col("watch_history", "id",          "UUID PRIMARY KEY DEFAULT gen_random_uuid()")
     await add_col("watch_history", "watch_type",  "TEXT DEFAULT 'first_watch'")
+    await add_col("watch_history", "rating",      "FLOAT")
+    await add_col("watch_history", "review_id",   "UUID")
+
+    try:
+        # Note: We try to drop by name or by signature. 
+        # Standard Postgres name for unique constraint is '{table}_{col1}_{col2}_key'
+        await db.execute(text("ALTER TABLE public.watch_history DROP CONSTRAINT IF EXISTS watch_history_user_id_content_id_key"))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+
+    await add_col("reviews", "watch_history_id", "UUID")
 
     await add_col("activity_log", "news_id",          "UUID")
     await add_col("activity_log", "details",          "JSONB DEFAULT '{}'")
     await add_col("activity_log", "related_user_id",  "UUID")
+    await add_col("activity_log", "is_rewatch",       "BOOLEAN DEFAULT false")
 
     await db.execute(text('''
         CREATE TABLE IF NOT EXISTS public.error_logs (
@@ -304,11 +329,9 @@ async def init_db_data_healing(db: AsyncSession):
                   SELECT 1 FROM collections c WHERE c.user_id = p.id AND c.name = 'Watched'
               )
         '''))
-        await db.execute(text('''
-            UPDATE collections SET collection_type = 'watchlist' WHERE name = 'Watchlist' AND collection_type NOT IN ('watchlist');
-            UPDATE collections SET collection_type = 'dropped' WHERE name = 'Dropped' AND collection_type NOT IN ('dropped');
-            UPDATE collections SET collection_type = 'watched' WHERE name = 'Watched' AND collection_type NOT IN ('watched');
-        '''))
+        await db.execute(text("UPDATE collections SET collection_type = 'watchlist' WHERE name = 'Watchlist' AND collection_type NOT IN ('watchlist')"))
+        await db.execute(text("UPDATE collections SET collection_type = 'dropped' WHERE name = 'Dropped' AND collection_type NOT IN ('dropped')"))
+        await db.execute(text("UPDATE collections SET collection_type = 'watched' WHERE name = 'Watched' AND collection_type NOT IN ('watched')"))
         await db.execute(text('''
             INSERT INTO collection_items (collection_id, content_id, added_by)
             SELECT c.id, ucs.content_id, ucs.user_id
@@ -356,3 +379,13 @@ async def init_db_data_healing(db: AsyncSession):
         await db.rollback()
 
     logger.info("Background database data healing completed successfully.")
+
+async def main():
+    from app.core.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as session:
+        await init_db(session)
+        await init_db_data_healing(session)
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())

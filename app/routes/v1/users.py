@@ -216,6 +216,27 @@ async def get_activity_feed(
     service = UserService(db)
     return ok(await service.get_activity(username, viewer_id))
 
+@router.get('/{username}/watch-history')
+async def get_user_watch_history(
+    username: str,
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    viewer_id: str | None = Depends(get_current_user_id_optional)
+):
+    from app.services.user_service import UserService
+    from app.services.action_service import ActionService
+    u_svc = UserService(db)
+    user = await u_svc.get_by_username(username, viewer_id=viewer_id)
+    
+    # Optional: check privacy settings for watch history
+    # if str(viewer_id) != str(user['id']) and user.get('watched_visibility') == 'private':
+    #     return ok([])
+
+    service = ActionService(db)
+    items = await service.get_user_watch_history(UUID(str(user['id'])), limit, offset)
+    return ok(items)
+
 @router.get('/{username}/collections')
 async def get_collections(
     username: str,

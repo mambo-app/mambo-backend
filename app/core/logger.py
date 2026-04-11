@@ -6,7 +6,7 @@ All log calls should pass structured data via `extra={...}` so
 production logs are queryable by field (Sentry, Datadog, etc.).
 
 Usage:
-    from app.core.logging import get_logger
+    from app.core.logger import get_logger
     logger = get_logger('mambo.content')
     logger.error("tmdb_upsert_failed", extra={"title": "Dune", "error": str(e)})
 """
