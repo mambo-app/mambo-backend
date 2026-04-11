@@ -1,5 +1,5 @@
-# import sentry_sdk
-# from sentry_sdk.integrations.fastapi import FastApiIntegration
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -109,9 +109,9 @@ app = FastAPI(
 )
 
 # Middleware
-# app.add_middleware(SecurityHeadersMiddleware)
-# app.add_middleware(TimingMiddleware)
-# app.add_middleware(RequestIDMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(TimingMiddleware)
+app.add_middleware(RequestIDMiddleware)
 # app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -162,7 +162,6 @@ app.include_router(media.router,         prefix='/media')
 
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
-    print(">>> PING RECEIVED: /")
     return {
         "message": "Welcome to Mambo API",
         "version": "1.0.0",
@@ -173,7 +172,6 @@ async def root():
 @app.api_route('/health', methods=['GET', 'HEAD'])
 async def health():
     """Lightweight health check for Render/Cloudflare liveness probes."""
-    print(">>> PING RECEIVED: /health")
     return {
         'status': 'ok',
         'env': settings.app_env,

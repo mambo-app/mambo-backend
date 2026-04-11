@@ -79,8 +79,8 @@ def configure_logging(level: str = 'INFO') -> None:
     for noisy in ('httpx', 'httpcore', 'hpack', 'hpack.hpack', 'hpack.table', 'urllib3'):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     
-    # Keep uvicorn.access at INFO level always to ensure visibility
-    logging.getLogger('uvicorn.access').setLevel(logging.INFO)
+    # Keep uvicorn.access at INFO level unless in production
+    logging.getLogger('uvicorn.access').setLevel(logging.INFO if level == 'DEBUG' else logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:
