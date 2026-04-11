@@ -257,9 +257,12 @@ class SocialService:
         await action_svc._sync_to_collection(user_id, content_id, 'Watched')
 
         # 3. Log activity for the review itself
+        # Change type based on whether text was provided as requested
+        activity_type = 'reviewed' if text_review and text_review.strip() else 'rated'
+        
         await action_svc._log_activity(
             user_id=user_id,
-            activity_type='reviewed',
+            activity_type=activity_type,
             content_id=content_id,
             review_id=review['id'],
             details={'rating': star_rating}
@@ -320,9 +323,14 @@ class SocialService:
         # Log activity
         from app.services.action_service import ActionService
         action_svc = ActionService(self.db)
+        
+        # Check if text exists in the original result or new data
+        text_content = data.get('text_review') or result.get('text_review')
+        activity_type = 'updated_review' if text_content and text_content.strip() else 'updated_rating'
+
         await action_svc._log_activity(
             user_id=user_id,
-            activity_type='updated_review',
+            activity_type=activity_type,
             content_id=result['content_id'],
             review_id=review_id,
             details={'rating': data.get('star_rating')}
