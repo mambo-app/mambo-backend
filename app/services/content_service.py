@@ -539,8 +539,8 @@ class ContentService:
                 row = res.mappings().one_or_none()
             
             # 2. Try external IDs if not found by UUID or if content_id is an external ID
-            if not row:
-                res = await self.db.execute(text("SELECT * FROM content WHERE tmdb_id = :id OR mal_id = :id"), {"id": content_id})
+            if not row and content_id.isdigit():
+                res = await self.db.execute(text("SELECT * FROM content WHERE tmdb_id = :id OR mal_id = :id"), {"id": int(content_id)})
                 row = res.mappings().one_or_none()
 
             # 3. If still not found, it's a 404
