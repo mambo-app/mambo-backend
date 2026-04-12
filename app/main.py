@@ -20,18 +20,16 @@ configure_logging(level='INFO')
 from app.routes.v1 import auth, users, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media
 
 if settings.sentry_dsn:
-    # Disable Sentry temporarily to match the stable 'PING' build
-    # import sentry_sdk
-    # from sentry_sdk.integrations.fastapi import FastApiIntegration
-    # sentry_sdk.init(
-    #     dsn=settings.sentry_dsn,
-    #     integrations=[FastApiIntegration(
-    #         transaction_style="endpoint",
-    #     )],
-    #     traces_sample_rate=0.1,
-    #     profiles_sample_rate=0.1,
-    # )
-    pass
+    import sentry_sdk
+    from sentry_sdk.integrations.fastapi import FastApiIntegration
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        integrations=[FastApiIntegration(
+            transaction_style="endpoint",
+        )],
+        traces_sample_rate=0.1,
+        profiles_sample_rate=0.1,
+    )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -110,10 +108,10 @@ app = FastAPI(
     default_response_class=JSONResponse,
 )
 
-# Middleware (Reverted to the 'PING' state)
-# app.add_middleware(SecurityHeadersMiddleware)
-# app.add_middleware(TimingMiddleware)
-# app.add_middleware(RequestIDMiddleware)
+# Middleware
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(TimingMiddleware)
+app.add_middleware(RequestIDMiddleware)
 # app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
