@@ -8,6 +8,9 @@ class ReviewCreate(BaseModel):
     text_review: str | None = Field(None, max_length=5000)
     contains_spoiler: bool = False
     tags: list[str] = []
+    tagged_seasons: list[int] = []
+    tagged_episodes: list[int] = []
+    review_type: str = "overall" # overall, season, episode
 
     @field_validator('tags')
     @classmethod
@@ -24,6 +27,9 @@ class ReviewResponse(BaseModel):
     text_review: str | None
     contains_spoiler: bool
     tags: list[str]
+    tagged_seasons: list[int] = []
+    tagged_episodes: list[int] = []
+    review_type: str = "overall"
     likes_count: int
     comments_count: int
     saves_count: int

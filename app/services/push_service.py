@@ -19,7 +19,7 @@ class PushService:
         self.db = db
 
     async def send_to_user(self, user_id: str, title: str, body: str,
-                            data: dict = None) -> None:
+                            image_url: str = None, data: dict = None) -> None:
         try:
             # Fetch all tokens for the user, most recent first
             result = await self.db.execute(text('''
@@ -35,8 +35,25 @@ class PushService:
             for row in rows:
                 token = row[0]
                 try:
+                    # Construct Rich Notification
+                    notification = messaging.Notification(
+                        title=title,
+                        body=body,
+                        image=image_url
+                    )
+                    
+                    # Specific Android adjustments for Large Icon (PFP/Poster)
+                    android_config = messaging.AndroidConfig(
+                        notification=messaging.AndroidNotification(
+                            icon='stock_ticker_update', # Small icon
+                            color='#E50914', # Mambo Red
+                            large_icon=image_url if image_url else None
+                        )
+                    )
+
                     message = messaging.Message(
-                        notification=messaging.Notification(title=title, body=body),
+                        notification=notification,
+                        android=android_config,
                         data=data or {},
                         token=token,
                     )

@@ -369,11 +369,13 @@ class UserService:
                 CAST(al.post_id AS TEXT) as post_id,
                 al.details,
                 p.username as actor_username,
-                p.display_name as actor_display_name
+                p.display_name as actor_display_name,
+                ucs.status as user_content_status
             FROM activity_log al
             JOIN profiles p ON p.id = al.user_id
             LEFT JOIN reviews r ON r.id = al.review_id
             LEFT JOIN content c ON c.id = COALESCE(al.content_id, r.content_id)
+            LEFT JOIN user_content_status ucs ON ucs.content_id = c.id AND ucs.user_id = al.user_id
             WHERE p.username = :username
             AND (al.visibility = 'public' OR :is_owner = true)
             AND (al.review_id IS NULL OR (r.id IS NOT NULL AND r.is_deleted = false))
@@ -423,23 +425,23 @@ class UserService:
         return [dict(row) for row in result.mappings()]
 
     async def get_collections(self, username: str, viewer_id: str | None = None) -> list[dict]:
-        # Fetch collections and apply privacy logic
-        result = await self.db.execute(text('''
-            SELECT c.id, c.user_id, c.name, c.description, c.is_public, 
-                   c.is_pinned, c.pin_order, c.is_default, c.is_deletable,
-                   c.created_at, c.visibility,
-                   COUNT(ci.content_id) as item_count
-            FROM collections c
-            JOIN profiles p ON p.id = c.user_id
-            LEFT JOIN collection_items ci ON ci.collection_id = c.id
-            WHERE p.username = :username 
-            AND (c.visibility = 'public' OR c.user_id = CAST(:viewer_id AS UUID))
-            GROUP BY c.id, c.user_id, c.name, c.description, c.is_public, 
-                     c.is_pinned, c.pin_order, c.is_default, c.is_deletable,
-                     c.created_at, c.visibility
-            ORDER BY c.is_pinned DESC, c.pin_order ASC, c.created_at DESC
-        '''), {'username': username, 'viewer_id': viewer_id})
-        return [dict(row) for row in result.mappings()]
+        # 1. Resolve username to UUID
+        profile = await self.get_by_username(username, viewer_id)
+        target_user_id = profile['id']
+        
+        # 2. Use CollectionService for the optimized data
+        from app.services.collection_service import CollectionService
+        col_service = CollectionService(self.db)
+        
+        # Parse viewer_id safely
+        v_id = None
+        if viewer_id:
+            try:
+                v_id = UUID(str(viewer_id))
+            except (ValueError, TypeError):
+                pass
+                
+        return await col_service.get_user_collections(target_user_id, v_id)
 
     async def update_privacy(self, user_id: str, data: dict) -> dict:
         from app.repositories.user_repo import UserRepository
@@ -493,7 +495,8 @@ class UserService:
             SELECT 
                 user_id,
                 total_watched, total_reviews, total_posts,
-                followers_count, following_count, friends_count
+                followers_count, following_count, friends_count,
+                current_streak, max_streak, last_streak_at
             FROM user_stats
             WHERE user_id = CAST(:user_id AS UUID)
         '''), {'user_id': user_id})
@@ -506,9 +509,202 @@ class UserService:
                 "total_posts": 0,
                 "followers_count": 0,
                 "following_count": 0,
-                "friends_count": 0
+                "friends_count": 0,
+                "current_streak": 0,
+                "max_streak": 0,
+                "last_streak_at": None
             }
         return dict(stats)
+
+    async def get_wrapped_stats(self, username: str, timeframe: str, viewer_id: str | None = None) -> dict:
+        import datetime
+        profile = await self.get_by_username(username, viewer_id)
+        owner_id = str(profile['id'])
+        
+        # Privacy Check
+        is_owner = viewer_id == owner_id
+        visibility_setting = profile.get('stats_visibility', profile.get('activity_visibility', 'public'))
+        
+        if not is_owner and visibility_setting == 'private':
+            return {}
+            
+        now = datetime.datetime.now(datetime.timezone.utc)
+        
+        date_filter = ""
+        params = {"uid": owner_id}
+        
+        if timeframe == "day":
+            start_date = now - datetime.timedelta(hours=24)
+        elif timeframe == "week":
+            start_date = now - datetime.timedelta(days=7)
+        elif timeframe == "month":
+            start_date = now - datetime.timedelta(days=30)
+        elif timeframe == "year":
+            start_date = datetime.datetime(now.year, 1, 1, tzinfo=datetime.timezone.utc)
+        else:
+            start_date = None
+
+        if start_date:
+            params['start_date'] = start_date
+            date_filter = """
+                AND (
+                    wh.watched_at >= :start_date 
+                    OR EXISTS (
+                        SELECT 1 FROM activity_log al 
+                        WHERE al.user_id = wh.user_id 
+                        AND al.content_id = wh.content_id 
+                        AND al.activity_type IN ('watched', 'rewatched', 'rated', 'reviewed')
+                        AND al.created_at >= :start_date
+                    )
+                )
+            """
+        else:
+            date_filter = ""
+            
+        # 1. Total watches
+        query = f'''
+            SELECT 
+                c.content_type, 
+                c.total_episodes,
+                wh.watched_at,
+                wh.rating,
+                c.id as content_id,
+                c.title,
+                c.poster_url,
+                c.genres
+            FROM watch_history wh
+            JOIN content c ON wh.content_id = c.id
+            WHERE wh.user_id = CAST(:uid AS UUID) {date_filter}
+        '''
+        
+        res = await self.db.execute(text(query), params)
+        watches = res.mappings().all()
+        
+        movies_count = 0
+        series_count = 0
+        anime_count = 0
+        total_minutes = 0
+        
+        genre_counts = {}
+        rating_counts = [0, 0, 0, 0, 0] # 1 to 5 stars
+        
+        content_ratings = {} 
+        content_info = {} 
+        
+        timeline_intensity = {}
+        daily_watches = {}
+        
+        # 0. Fetch episode-level watches for precise series/anime time
+        ep_date_filter = ""
+        if start_date:
+            ep_date_filter = "AND ewh.watched_at >= :start_date"
+            
+        ep_res = await self.db.execute(text(f'''
+            SELECT ewh.content_id, c.content_type
+            FROM episode_watch_history ewh
+            JOIN content c ON c.id = ewh.content_id
+            WHERE ewh.user_id = CAST(:uid AS UUID) {ep_date_filter}
+        '''), params)
+        episodes = ep_res.mappings().all()
+        
+        # Track which content IDs have episode-level data in this period
+        contents_with_episodes = {} # cid -> count
+        for ep in episodes:
+            cid = str(ep['content_id'])
+            contents_with_episodes[cid] = contents_with_episodes.get(cid, 0) + 1
+
+        for w in watches:
+            cid = str(w['content_id'])
+            ctype = w['content_type'] or 'movie'
+            
+            if ctype == 'movie':
+                movies_count += 1
+                total_minutes += 120
+            elif ctype == 'series' or ctype == 'anime':
+                if ctype == 'series': series_count += 1
+                else: anime_count += 1
+                
+                # If we have individual episode logs, use them!
+                if cid in contents_with_episodes:
+                    ep_count = contents_with_episodes[cid]
+                    total_minutes += ep_count * (45 if ctype == 'series' else 24)
+                else:
+                    # Fallback: Treat as a full series watch if they marked it completed
+                    total_minutes += (w['total_episodes'] or 10) * (45 if ctype == 'series' else 24)
+                
+            # Genres
+            genres = w['genres'] or []
+            if isinstance(genres, str):
+                import json
+                try: genres = json.loads(genres)
+                except: genres = []
+                
+            for g in genres:
+                genre_counts[g] = genre_counts.get(g, 0) + 1
+                
+            # Ratings
+            if w['rating'] is not None:
+                r = float(w['rating'])
+                idx = max(0, min(4, int(r - 1)))
+                rating_counts[idx] += 1
+                
+                cid = w['content_id']
+                if cid not in content_ratings or r > content_ratings[cid]:
+                    content_ratings[cid] = r
+                    content_info[cid] = {
+                        "content_id": str(cid),
+                        "title": w['title'],
+                        "poster_url": w['poster_url'],
+                        "rating": r
+                    }
+            
+            # Timeline Intensity
+            dt = w['watched_at']
+            if dt:
+                if timeframe in ['week', 'month']:
+                    key = dt.strftime('%Y-%m-%d')
+                elif timeframe == 'year':
+                    key = dt.strftime('%b') # Month abbrev
+                else:
+                    key = dt.strftime('%Y')
+                timeline_intensity[key] = timeline_intensity.get(key, 0) + 1
+                
+                day_key = dt.strftime('%Y-%m-%d')
+                daily_watches[day_key] = daily_watches.get(day_key, 0) + 1
+                
+        # Aggregate Top Rated (sort by rating DESC)
+        top_rated = sorted(content_info.values(), key=lambda x: x['rating'], reverse=True)[:10]
+        
+        # Aggregate Top Genres
+        top_genres = [{"genre": k, "count": v} for k, v in sorted(genre_counts.items(), key=lambda item: item[1], reverse=True)[:5]]
+        
+        biggest_binge_date = None
+        biggest_binge_count = 0
+        if daily_watches:
+            biggest_binge_date = max(daily_watches, key=daily_watches.get)
+            biggest_binge_count = daily_watches[biggest_binge_date]
+            
+        if timeframe == 'year':
+            months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+            timeline_formatted = [{"label": m, "count": timeline_intensity.get(m, 0)} for m in months]
+        elif timeframe == 'all':
+            years = sorted(timeline_intensity.keys())
+            timeline_formatted = [{"label": str(y), "count": timeline_intensity[y]} for y in years]
+        else:
+            timeline_formatted = [{"label": k, "count": v} for k, v in sorted(timeline_intensity.items())]
+
+        return {
+            "total_minutes": total_minutes,
+            "movies_count": movies_count,
+            "series_count": series_count,
+            "anime_count": anime_count,
+            "top_rated": top_rated,
+            "timeline_intensity": timeline_formatted,
+            "rating_distribution": rating_counts,
+            "top_genres": top_genres,
+            "biggest_binge_date": biggest_binge_date,
+            "biggest_binge_count": biggest_binge_count
+        }
 
     async def get_followers(self, username: str, limit: int = 20, offset: int = 0) -> list[dict]:
         from app.repositories.user_repo import UserRepository

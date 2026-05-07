@@ -12,15 +12,8 @@ class AuthService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    async def register(self, username: str, email: str, phone: str | None, password: str, invite_key: str) -> dict:
-        # 1. Check invite key
-        if invite_key != settings.invite_key:
-            raise HTTPException(
-                status_code=403,
-                detail='Invalid verification key. Please sign up again.'
-            )
-
-        # 2. Validate password strength
+    async def register(self, username: str, email: str, phone: str | None, password: str) -> dict:
+        # 1. Validate password strength
         if len(password) < 8:
             raise HTTPException(status_code=400, detail='Password must be at least 8 characters.')
 
@@ -279,6 +272,162 @@ class AuthService:
         except Exception as e:
             logger.error(f"Token refresh unexpected error: {type(e).__name__}: {e}")
             raise _HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
+    async def login_with_google(self, id_token: str) -> dict:
+        from google.oauth2 import id_token as google_id_token
+        from google.auth.transport import requests as google_requests
+        
+        # This is your Web Client ID from the screenshot
+        GOOGLE_CLIENT_ID = "350334884442-f5epk0tkbceh89h09qv7urifn6ffivkm.apps.googleusercontent.com"
+        
+        try:
+            # 1. Verify Google Token with Audience check
+            id_info = google_id_token.verify_oauth2_token(
+                id_token, google_requests.Request(), GOOGLE_CLIENT_ID
+            )
+            
+            email = id_info.get('email')
+            if not email:
+                raise HTTPException(status_code=400, detail="Email not provided by Google")
+            
+            # 2. Check if user exists in Supabase
+            try:
+                # We use the admin client to check by email
+                from app.core.supabase import supabase_admin
+                user_res = supabase_admin.auth.admin.list_users() # Not ideal but get_user_by_email is sometimes flaky in old SDKs
+                # Efficiently check by filtering in our Neon profiles first!
+                result = await self.db.execute(text("SELECT id FROM profiles WHERE email = :e"), {'e': email})
+                profile = result.mappings().first()
+                
+                if profile:
+                    # Existing user: We need a Supabase session.
+                    # This is tricky: Backend can't "sudo login" as a user and get a session token
+                    # UNLESS we use a custom JWT or allow the mobile app to sign in with ID token.
+                    # BEST WAY: If user exists, tell mobile app to "sign in with Supabase ID Token" 
+                    # OR we handle it here if Supabase supports admin-level session generation.
+                    
+                    user_id = profile['id']
+                    # We can't easily generate a SESSION here without a password.
+                    # But wait, Supabase has a "link" or we can use our service role to bypass.
+                    # Actually, the easiest way for mobile is to return a special flag
+                    # to tell the mobile app to use its Supabase client to sign in with the token.
+                    
+                    return {
+                        "is_new_user": False,
+                        "profile": dict(await self.check_verified(user_id))
+                    }
+                else:
+                    # New user: Provisioning state
+                    return {
+                        "is_new_user": True,
+                        "email": email,
+                        "display_name": id_info.get('name', ''),
+                        "provisioning_token": id_token # We use the ID token as the proof for the final step
+                    }
+                    
+            except Exception as e:
+                logger.error(f"Google discovery failed: {e}")
+                raise HTTPException(status_code=500, detail="Auth service synchronization failed")
+
+        except ValueError as e:
+            raise HTTPException(status_code=401, detail=f"Invalid Google token: {e}")
+
+    async def finalize_google_signup(self, username: str, provisioning_token: str, password: str) -> dict:
+        from google.oauth2 import id_token as google_id_token
+        from google.auth.transport import requests as google_requests
+        
+        GOOGLE_CLIENT_ID = "350334884442-f5epk0tkbceh89h09qv7urifn6ffivkm.apps.googleusercontent.com"
+        
+        # 1. Re-verify the provisioning token with Audience check
+        id_info = google_id_token.verify_oauth2_token(
+            provisioning_token, google_requests.Request(), GOOGLE_CLIENT_ID
+        )
+        email = id_info.get('email')
+        
+        # 2. Check username
+        existing = await self.db.execute(text('SELECT id FROM profiles WHERE username = :u'), {'u': username})
+        if existing.fetchone():
+            raise HTTPException(status_code=409, detail='Username already taken.')
+            
+        # 3. Create user in Supabase with the confirmed email
+        # We also set the password so they have a backup manual login!
+        try:
+            res = supabase_admin.auth.admin.create_user({
+                "email": email,
+                "password": password,
+                "email_confirm": True,
+                "user_metadata": {
+                    "username": username,
+                    "display_name": id_info.get('name', username)
+                }
+            })
+            user_id = res.user.id
+        except Exception as e:
+             raise HTTPException(status_code=400, detail=str(e))
+
+        # 4. Create Neon Profile
+        # ... logic similar to register() ...
+        # I'll extract it to a helper if I had one, but I'll just write it for now.
+        await self.db.execute(text('''
+            INSERT INTO profiles (id, username, display_name, email, is_verified)
+            VALUES (:id, :username, :dname, :email, true)
+        '''), {
+            'id': user_id, 
+            'username': username, 
+            'dname': id_info.get('name', username),
+            'email': email
+        })
+        
+        # 5. Create default related rows
+        try:
+            # Stats
+            await self.db.execute(text('''
+                INSERT INTO user_stats (user_id) VALUES (:id)
+                ON CONFLICT (user_id) DO NOTHING
+            '''), {'id': user_id})
+            
+            # Privacy
+            await self.db.execute(text('''
+                INSERT INTO privacy_settings (user_id) VALUES (:id)
+                ON CONFLICT (user_id) DO NOTHING
+            '''), {'id': user_id})
+            
+            # Default Collections
+            default_collections = [
+                ('Watchlist', 'My watchlist of movies and shows', False, True, True, 1),
+                ('Dropped', 'Content I stopped watching', False, True, True, 2),
+                ('Watched', 'All content I have watched', False, True, True, 3),
+            ]
+            for name, desc, is_public, is_def, is_pin, pin_ord in default_collections:
+                await self.db.execute(text('''
+                    INSERT INTO collections (
+                        user_id, name, description, is_public, 
+                        collection_type, is_default, is_deletable,
+                        is_pinned, pin_order
+                    )
+                    VALUES (
+                        :uid, :name, :desc, :public, 
+                        :type, :is_def, false,
+                        :is_pin, :pin_ord
+                    )
+                    ON CONFLICT DO NOTHING
+                '''), {
+                    'uid': user_id,
+                    'name': name,
+                    'desc': desc,
+                    'public': is_public,
+                    'type': name.lower(),
+                    'is_def': is_def,
+                    'is_pin': is_pin,
+                    'pin_ord': pin_ord
+                })
+            
+            await self.db.commit()
+        except Exception as e:
+            logger.error(f"Failed to create related tables for Google user {user_id}: {e}")
+            await self.db.rollback()
+        
+        return await self.login(email, password)
 
     async def _delete_supabase_user(self, user_id: str):
         try:

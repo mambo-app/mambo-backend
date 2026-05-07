@@ -10,6 +10,15 @@ from uuid import UUID
 
 router = APIRouter()
 
+@router.get('/{id}', response_model=Dict[str, Any])
+async def get_review(
+    id: UUID,
+    db: AsyncSession = Depends(get_db)
+):
+    service = SocialService(db)
+    result = await service.get_review(id)
+    return ok(result)
+
 @router.get('/trending', response_model=Dict[str, Any])
 async def get_trending_reviews(
     limit: int = 10,
@@ -40,7 +49,10 @@ async def create_review(
         star_rating=req.star_rating,
         text_review=req.text_review,
         contains_spoiler=req.contains_spoiler,
-        tags=req.tags
+        tags=req.tags,
+        tagged_seasons=req.tagged_seasons,
+        tagged_episodes=req.tagged_episodes,
+        review_type=req.review_type
     )
     return ok(result)
 

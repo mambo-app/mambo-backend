@@ -140,6 +140,12 @@ class SocialService:
     async def get_comments(self, post_id: UUID | None = None, review_id: UUID | None = None, limit: int = 50, offset: int = 0) -> list[dict]:
         return await self.repo.get_comments(post_id, review_id, limit, offset)
 
+    async def delete_comment(self, user_id: UUID, comment_id: UUID) -> dict:
+        deleted = await self.repo.delete_comment(user_id, comment_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Comment not found or not authorized")
+        return {"status": "success"}
+
     async def toggle_upvote(self, user_id: UUID, target_id: UUID, target_type: str) -> bool:
         return await self.repo.toggle_upvote(user_id, target_id, target_type)
 
@@ -225,7 +231,7 @@ class SocialService:
     async def share_review(self, user_id: UUID, review_id: UUID, conversation_id: UUID | None = None, recipient_id: UUID | None = None) -> dict:
         return await self.get_share_metadata(user_id, review_id, 'review', conversation_id, recipient_id)
 
-    async def get_user_reviews(self, user_id: UUID, viewer_id: str | None = None, limit: int = 20, offset: int = 0) -> list[dict]:
+    async def get_user_reviews(self, user_id: UUID, viewer_id: str | None = None, limit: int = 20, offset: int = 0, sort_order: str = 'desc') -> list[dict]:
         # Privacy Check
         from app.services.user_service import UserService
         u_svc = UserService(self.db)
@@ -234,16 +240,33 @@ class SocialService:
         if str(viewer_id) != str(user_id) and profile.get('reviews_visibility') == 'private':
             return []
 
-        return await self.repo.get_reviews_by_user(user_id, limit, offset)
+        return await self.repo.get_reviews_by_user(user_id, limit, offset, sort_order)
 
-    async def create_review(self, user_id: UUID, content_id: UUID, star_rating: float, text_review: str, contains_spoiler: bool = False, tags: list[str] = []) -> dict:
+    async def create_review(self, user_id: UUID, content_id: UUID, star_rating: float, text_review: str, contains_spoiler: bool = False, tags: list[str] = [], tagged_seasons: list[int] = [], tagged_episodes: list[int] = [], review_type: str = "overall") -> dict:
         # 1. Enforce mandatory text
         if not text_review or not text_review.strip():
             raise HTTPException(status_code=400, detail="Review text is mandatory. Use 'Rate' for star-only ratings.")
 
+        # --- UPSERT LOGIC ---
+        # Check if a review for this exact target already exists
+        existing = await self.repo.find_existing_review(
+            user_id, content_id, review_type, tagged_seasons, tagged_episodes
+        )
+        
+        if existing:
+            # If it exists, update it instead of creating a duplicate
+            return await self.update_review(user_id, existing['id'], {
+                'star_rating': star_rating,
+                'text_review': text_review,
+                'contains_spoiler': contains_spoiler,
+                'tagged_seasons': tagged_seasons,
+                'tagged_episodes': tagged_episodes,
+                'review_type': review_type
+            })
+
+        # --- END UPSERT LOGIC ---
+
         # 2. Find the most recent watch session to link
-        # If one exists within a reasonable window (e.g. 1 hour) and has no review, we link it.
-        # Otherwise, we create a new watch event.
         from app.services.action_service import ActionService
         from app.models.action import ActionType
         action_svc = ActionService(self.db)
@@ -272,7 +295,10 @@ class SocialService:
             content_id=content_id,
             star_rating=star_rating,
             text_review=text_review,
-            is_spoiler=contains_spoiler
+            is_spoiler=contains_spoiler,
+            tagged_seasons=tagged_seasons,
+            tagged_episodes=tagged_episodes,
+            review_type=review_type
         )
 
         # 4. Link the session to the review
@@ -290,7 +316,12 @@ class SocialService:
             activity_type='reviewed',
             content_id=content_id,
             review_id=review['id'],
-            details={'rating': star_rating}
+            details={
+                'rating': star_rating,
+                'tagged_seasons': tagged_seasons,
+                'tagged_episodes': tagged_episodes,
+                'review_type': review_type
+            }
         )
 
         # 6. Update user stats
@@ -308,6 +339,12 @@ class SocialService:
         await u_svc.invalidate_profile_cache(str(user_id))
 
         await self.db.commit()
+        return review
+
+    async def get_review(self, review_id: UUID) -> dict:
+        review = await self.repo.get_review(review_id)
+        if not review:
+            raise HTTPException(status_code=404, detail="Review not found")
         return review
 
     async def get_trending_reviews(self, limit: int = 5) -> list[dict]:

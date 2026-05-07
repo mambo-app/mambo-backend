@@ -81,9 +81,10 @@ class RecommendationService:
                 )
                 logger.info(f"Conversation created/found: {conv_id}")
                 
-                chat_body = f"I'm recommending this to you: {content_title}"
                 if message:
-                    chat_body += f"\n\n'{message}'"
+                    chat_body = f"\"{message}\""
+                else:
+                    chat_body = f"I think you'd love {content_title}! 🍿"
                     
                 await self.chat_service.send_message(
                     user_id=str(sender_id),

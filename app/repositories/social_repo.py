@@ -201,6 +201,30 @@ class SocialRepository(BaseRepository):
                 LIMIT :limit OFFSET :offset
             ''', {'review_id': review_id, 'limit': limit, 'offset': offset})
 
+    async def delete_comment(self, user_id: UUID, comment_id: UUID) -> bool:
+        """Delete a comment and decrement the parent's comment count."""
+        # 1. Try to find it in post_comments
+        res = await self.db.execute(text("SELECT post_id FROM post_comments WHERE id = :id AND user_id = :uid"), {'id': comment_id, 'uid': user_id})
+        post_comment = res.mappings().one_or_none()
+        
+        if post_comment:
+            await self.db.execute(text("DELETE FROM post_comments WHERE id = :id"), {'id': comment_id})
+            await self.db.execute(text("UPDATE posts SET comments_count = GREATEST(0, comments_count - 1) WHERE id = :pid"), {'pid': post_comment['post_id']})
+            await self.db.commit()
+            return True
+            
+        # 2. Try review_comments
+        res = await self.db.execute(text("SELECT review_id FROM review_comments WHERE id = :id AND user_id = :uid"), {'id': comment_id, 'uid': user_id})
+        review_comment = res.mappings().one_or_none()
+        
+        if review_comment:
+            await self.db.execute(text("DELETE FROM review_comments WHERE id = :id"), {'id': comment_id})
+            await self.db.execute(text("UPDATE reviews SET comments_count = GREATEST(0, comments_count - 1) WHERE id = :rid"), {'rid': review_comment['review_id']})
+            await self.db.commit()
+            return True
+            
+        return False
+
     # --- Upvotes ---
     async def toggle_upvote(self, user_id: UUID, target_id: UUID, target_type: str) -> bool:
         """Toggle upvote in a single atomic operation (one commit)."""
@@ -280,17 +304,20 @@ class SocialRepository(BaseRepository):
         return result
 
     # --- Reviews (Additional) ---
-    async def create_review(self, user_id: UUID, content_id: UUID, star_rating: float, text_review: str | None, is_spoiler: bool) -> dict:
+    async def create_review(self, user_id: UUID, content_id: UUID, star_rating: float, text_review: str | None, is_spoiler: bool, tagged_seasons: list[int] = [], tagged_episodes: list[int] = [], review_type: str = "overall") -> dict:
         review = await self.execute_returning('''
-            INSERT INTO reviews (user_id, content_id, rating, text_review, is_spoiler)
-            VALUES (:user_id, :content_id, :rating, :text_review, :is_spoiler)
-            RETURNING id, user_id, content_id, rating as star_rating, text_review, is_spoiler as contains_spoiler, created_at
+            INSERT INTO reviews (user_id, content_id, rating, text_review, is_spoiler, tagged_seasons, tagged_episodes, review_type)
+            VALUES (:user_id, :content_id, :rating, :text_review, :is_spoiler, :tagged_seasons, :tagged_episodes, :review_type)
+            RETURNING id, user_id, content_id, rating as star_rating, text_review, is_spoiler as contains_spoiler, tagged_seasons, tagged_episodes, review_type, created_at
         ''', {
             'user_id': user_id,
             'content_id': content_id,
             'rating': star_rating,
             'text_review': text_review,
-            'is_spoiler': is_spoiler
+            'is_spoiler': is_spoiler,
+            'tagged_seasons': tagged_seasons,
+            'tagged_episodes': tagged_episodes,
+            'review_type': review_type
         })
         if review:
             # Increment both total_reviews and total_posts
@@ -304,8 +331,35 @@ class SocialRepository(BaseRepository):
             ''', {'uid': user_id})
         return review
 
+    async def find_existing_review(self, user_id: UUID, content_id: UUID, review_type: str, tagged_seasons: list[int] = [], tagged_episodes: list[int] = []) -> dict | None:
+        # Array comparison in Postgres requires careful handling. 
+        # We use ARRAY[...]::int[] to ensure types match.
+        return await self.fetch_one('''
+            SELECT id FROM reviews 
+            WHERE user_id = :user_id 
+            AND content_id = :content_id 
+            AND review_type = :review_type
+            AND tagged_seasons = CAST(:seasons AS int[])
+            AND tagged_episodes = CAST(:episodes AS int[])
+            AND is_deleted = false
+            LIMIT 1
+        ''', {
+            'user_id': user_id,
+            'content_id': content_id,
+            'review_type': review_type,
+            'seasons': tagged_seasons,
+            'episodes': tagged_episodes
+        })
+
     async def update_review(self, review_id: UUID, user_id: UUID, data: dict) -> dict | None:
-        allowed_fields = {'star_rating': 'rating', 'text_review': 'text_review', 'contains_spoiler': 'is_spoiler'}
+        allowed_fields = {
+            'star_rating': 'rating', 
+            'text_review': 'text_review', 
+            'contains_spoiler': 'is_spoiler',
+            'tagged_seasons': 'tagged_seasons',
+            'tagged_episodes': 'tagged_episodes',
+            'review_type': 'review_type'
+        }
         updates = []
         params = {'id': review_id, 'user_id': user_id}
         
@@ -321,7 +375,7 @@ class SocialRepository(BaseRepository):
             UPDATE reviews 
             SET {", ".join(updates)}, updated_at = now()
             WHERE id = :id AND user_id = :user_id
-            RETURNING id, user_id, content_id, rating as star_rating, text_review, is_spoiler as contains_spoiler, created_at
+            RETURNING id, user_id, content_id, rating as star_rating, text_review, is_spoiler as contains_spoiler, tagged_seasons, tagged_episodes, review_type, created_at
         '''
         return await self.execute_returning(query, params)
 
@@ -333,17 +387,20 @@ class SocialRepository(BaseRepository):
             WHERE r.id = :id AND r.is_deleted = false
         ''', {'id': review_id})
 
-    async def get_reviews_by_user(self, user_id: UUID, limit: int = 20, offset: int = 0) -> list[dict]:
-        return await self.fetch_many('''
+    async def get_reviews_by_user(self, user_id: UUID, limit: int = 20, offset: int = 0, sort_order: str = 'desc') -> list[dict]:
+        order_sql = "ASC" if sort_order.lower() == 'asc' else "DESC"
+        return await self.fetch_many(f'''
             (
-                SELECT r.id, r.user_id, r.content_id, r.rating, r.text_review, r.is_spoiler, r.created_at,
+                SELECT r.id, r.user_id, r.content_id, r.rating, r.text_review as body, r.is_spoiler, r.created_at,
                        r.rating as star_rating, 
                        r.is_spoiler as contains_spoiler,
+                       r.review_type, r.tagged_seasons, r.tagged_episodes,
                        pr.username, pr.avatar_url, pr.is_verified,
                        c.title as content_title, 
                        c.poster_url as content_poster,
                        'review' as item_type,
-                       r.likes_count, r.comments_count
+                       r.likes_count as upvotes_count, r.comments_count,
+                       NULL as title
                 FROM reviews r
                 JOIN profiles pr ON pr.id = r.user_id
                 LEFT JOIN content c ON c.id = r.content_id
@@ -351,14 +408,16 @@ class SocialRepository(BaseRepository):
             )
             UNION ALL
             (
-                SELECT wh.id, wh.user_id, wh.content_id, wh.rating, NULL as text_review, false as is_spoiler, wh.watched_at as created_at,
+                SELECT wh.id, wh.user_id, wh.content_id, wh.rating, NULL as body, false as is_spoiler, wh.watched_at as created_at,
                        wh.rating as star_rating,
                        false as contains_spoiler,
+                       'overall' as review_type, ARRAY[]::int[] as tagged_seasons, ARRAY[]::int[] as tagged_episodes,
                        pr.username, pr.avatar_url, pr.is_verified,
                        c.title as content_title,
                        c.poster_url as content_poster,
                        'rating' as item_type,
-                       0 as likes_count, 0 as comments_count
+                       0 as upvotes_count, 0 as comments_count,
+                       NULL as title
                 FROM watch_history wh
                 JOIN profiles pr ON pr.id = wh.user_id
                 LEFT JOIN content c ON c.id = wh.content_id
@@ -371,7 +430,24 @@ class SocialRepository(BaseRepository):
                     AND r.is_deleted = false
                 )
             )
-            ORDER BY created_at DESC
+            UNION ALL
+            (
+                SELECT p.id, p.user_id, p.content_id, NULL as rating, p.body, false as is_spoiler, p.created_at,
+                       NULL as star_rating,
+                       false as contains_spoiler,
+                       'overall' as review_type, ARRAY[]::int[] as tagged_seasons, ARRAY[]::int[] as tagged_episodes,
+                       pr.username, pr.avatar_url, pr.is_verified,
+                       c.title as content_title,
+                       c.poster_url as content_poster,
+                       'discussion' as item_type,
+                       p.upvotes_count, p.comments_count,
+                       p.title
+                FROM posts p
+                JOIN profiles pr ON pr.id = p.user_id
+                LEFT JOIN content c ON c.id = p.content_id
+                WHERE p.user_id = :user_id
+            )
+            ORDER BY created_at {order_sql}
             LIMIT :limit OFFSET :offset
         ''', {'user_id': user_id, 'limit': limit, 'offset': offset})
 
@@ -443,3 +519,36 @@ class SocialRepository(BaseRepository):
             DELETE FROM blocked_users
             WHERE blocker_id = :user_id AND blocked_id = :target_id
         ''', {'user_id': user_id, 'target_id': target_id})
+
+    # --- Migration / Export ---
+    async def get_export_data(self, user_id: UUID) -> dict:
+        """Fetch all user activity for export."""
+        watched = await self.fetch_many('''
+            SELECT wh.watched_at as date, c.title, c.release_date
+            FROM watch_history wh
+            JOIN content c ON c.id = wh.content_id
+            WHERE wh.user_id = :user_id
+            ORDER BY wh.watched_at DESC
+        ''', {'user_id': user_id})
+
+        ratings = await self.fetch_many('''
+            SELECT wh.watched_at as date, c.title, c.release_date, wh.rating
+            FROM watch_history wh
+            JOIN content c ON c.id = wh.content_id
+            WHERE wh.user_id = :user_id AND wh.rating IS NOT NULL
+            ORDER BY wh.watched_at DESC
+        ''', {'user_id': user_id})
+
+        reviews = await self.fetch_many('''
+            SELECT r.created_at as date, c.title, c.release_date, r.rating, r.text_review as body, r.is_spoiler
+            FROM reviews r
+            JOIN content c ON c.id = r.content_id
+            WHERE r.user_id = :user_id AND r.is_deleted = false
+            ORDER BY r.created_at DESC
+        ''', {'user_id': user_id})
+
+        return {
+            'watched': watched,
+            'ratings': ratings,
+            'reviews': reviews
+        }

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from typing import List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import date, datetime
@@ -6,7 +7,7 @@ from sqlalchemy import text, or_, and_
 from uuid import UUID
 from app.services.tmdb_client import TMDBClient
 from app.services.mal_client import MALClient
-from app.models.content import ContentResponse, HomeTrendingResponse
+from app.models.content import ContentResponse, HomeTrendingResponse, ContentStatus, SeasonStatusResponse
 from app.core.logger import get_logger
 from app.services.cache_service import cache, CacheKeys, CacheService
 
@@ -18,6 +19,29 @@ class ContentService:
         self.tmdb_client = TMDBClient()
         self.mal_client = MALClient()
 
+    def _calculate_distribution(self, rating: float) -> List[float]:
+        """
+        Simulate a realistic rating distribution based on the average star rating (0-5 scale).
+        Using a simple normal-ish distribution model.
+        """
+        # Ensure rating is 1-5 for calculation
+        r = max(1.0, min(5.0, rating))
+        
+        # We want to create 5 weights that sum to 1.0, with a peak near 'r'
+        weights = []
+        total = 0.0
+        for i in range(1, 6):
+            # Distance from target rating
+            dist = abs(i - r)
+            # Use an exponential decay based on distance
+            # Closer to rating = higher weight
+            w = 1.0 / (1.0 + (dist * 2.0)**2)
+            weights.append(w)
+            total += w
+            
+        # Normalize to 1.0
+        return [round(w / total, 2) for w in weights]
+
     def _map_to_response(self, db_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         results = []
         today = date.today()
@@ -27,7 +51,9 @@ class ContentService:
                 rd = d.get('release_date')
                 d['is_anticipated'] = bool(rd and rd > today)
                 d['avg_star_rating'] = self._get_display_rating(d)
-                d['cast'] = d.get('cast', [])
+                # Ensure no conflict between DB status (release status) and user tracking status
+                if 'status' in d:
+                    d['release_status'] = d.pop('status')
                 
                 # 2. Validate with Pydantic for schema correctness
                 model = ContentResponse.model_validate(d)
@@ -35,6 +61,17 @@ class ContentService:
                 # 3. Convert back to dict and ensure ID is a string for the App
                 safe_dict = model.model_dump()
                 safe_dict['id'] = str(safe_dict['id'])
+                safe_dict['description'] = safe_dict.get('synopsis')
+                
+                # 4. Distribution and Counts
+                safe_dict['vote_count'] = d.get('vote_count') or 0
+                safe_dict['rating_distribution'] = self._calculate_distribution(d['avg_star_rating'])
+
+                # NEW: Ensure series metadata is passed to rows
+                if d.get('content_type') in ['series', 'anime', 'tv']:
+                    safe_dict['total_seasons'] = d.get('total_seasons') or 1
+                    safe_dict['total_episodes'] = d.get('total_episodes') or 0
+
                 if safe_dict.get('release_date'):
                     safe_dict['release_date'] = safe_dict['release_date'].isoformat()
                 
@@ -110,6 +147,19 @@ class ContentService:
             await cache.set(cache_key, resp.model_dump(), ttl=CacheService.TTL_TRENDING)
         except Exception: pass
         return resp
+
+    async def get_continue_watching(self, user_id: str) -> List[Dict[str, Any]]:
+        query = text("""
+            SELECT c.*, s.status as user_status, s.progress_episodes, s.last_activity_at
+            FROM content c
+            JOIN user_content_status s ON c.id = s.content_id
+            WHERE s.user_id = :uid AND s.status = 'watching'
+            ORDER BY s.updated_at DESC
+            LIMIT 10
+        """)
+        res = await self.db.execute(query, {'uid': UUID(user_id)})
+        rows = [dict(r) for r in res.mappings()]
+        return self._map_to_response(rows)
 
     async def get_discover_content(self, mode: str, user_id: Optional[str] = None) -> Dict[str, Any]:
         from datetime import date
@@ -243,30 +293,34 @@ class ContentService:
  
         # 3. BACKGROUND FETCH (if stale or empty)
         async def _background_fetch():
-            try:
-                logger.info(f"Discovery: BG Fetching {len(fetch_tasks)} tasks for {mode}...")
-                keys = list(fetch_tasks.keys())
-                # Use longer timeout for background work
-                net_res = await asyncio.wait_for(
-                    asyncio.gather(*[fetch_tasks[k] for k in keys], return_exceptions=True),
-                    timeout=15.0 
-                )
-                combined_tmdb = []
-                combined_mal = []
-                for i, val in enumerate(net_res):
-                    if isinstance(val, Exception): continue
-                    flat = []
-                    if isinstance(val, (list, tuple)) and any(isinstance(x, list) for x in val):
-                        for sub in val:
-                            if isinstance(sub, list): flat.extend(sub)
-                    elif isinstance(val, list): flat = val
-                    if mode == 'anime': combined_mal.extend(flat)
-                    else: combined_tmdb.extend(flat)
-                
-                if combined_tmdb: await self._upsert_tmdb_content(combined_tmdb, returning=False, is_permanent=False)
-                if combined_mal: await self._upsert_mal_content(combined_mal, returning=False, is_permanent=False)
-            except Exception as e:
-                logger.error(f"Discovery BG fetch error: {e}")
+            from app.core.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as bg_db:
+                # We need a new service instance with the new session
+                bg_service = ContentService(bg_db)
+                try:
+                    logger.info(f"Discovery: BG Fetching {len(fetch_tasks)} tasks for {mode}...")
+                    keys = list(fetch_tasks.keys())
+                    # Use longer timeout for background work
+                    net_res = await asyncio.wait_for(
+                        asyncio.gather(*[fetch_tasks[k] for k in keys], return_exceptions=True),
+                        timeout=15.0 
+                    )
+                    combined_tmdb = []
+                    combined_mal = []
+                    for i, val in enumerate(net_res):
+                        if isinstance(val, Exception): continue
+                        flat = []
+                        if isinstance(val, (list, tuple)) and any(isinstance(x, list) for x in val):
+                            for sub in val:
+                                if isinstance(sub, list): flat.extend(sub)
+                        elif isinstance(val, list): flat = val
+                        if mode == 'anime': combined_mal.extend(flat)
+                        else: combined_tmdb.extend(flat)
+                    
+                    if combined_tmdb: await bg_service._upsert_tmdb_content(combined_tmdb, returning=False, is_permanent=False)
+                    if combined_mal: await bg_service._upsert_mal_content(combined_mal, returning=False, is_permanent=False)
+                except Exception as e:
+                    logger.error(f"Discovery BG fetch error: {e}")
 
         # If data is completely missing, we MUST wait for the first fetch to avoid returning empty
         pop_db = await _db_query(limit=50, sort='recent')
@@ -482,28 +536,45 @@ class ContentService:
         # Check if local ID or TMDB ID
         is_uuid = False
         try:
+            from uuid import UUID
             UUID(person_id)
             is_uuid = True
-        except ValueError: pass
+        except (ValueError, ImportError): pass
         
         tmdb_id = None
         if is_uuid:
             res = await self.db.execute(text("SELECT tmdb_id FROM persons WHERE id::text = :id"), {"id": person_id})
             row = res.mappings().one_or_none()
             tmdb_id = row['tmdb_id'] if row else None
+            
+            # If not found in DB but is a valid integer string, fallback to treating as TMDB ID
+            if not tmdb_id:
+                try: tmdb_id = int(person_id)
+                except ValueError: pass
         else:
             try:
                 tmdb_id = int(person_id)
             except ValueError: pass
             
         if not tmdb_id:
+            logger.error(f"DEBUG_PROFILE_FAIL: Could not resolve tmdb_id for {person_id}")
+            logger.warning(f"Could not resolve TMDB ID for person_id: {person_id}")
             return {}
             
+        logger.info(f"DEBUG_PROFILE_RESOLVED: person_id={person_id} -> tmdb_id={tmdb_id}")
         # Fetch from TMDB (always fresh for detail screen)
         details = await self.tmdb_client.get_person_details(tmdb_id)
-        if not details: return {}
+        if not details: 
+            logger.error(f"DEBUG_PROFILE_FAIL: TMDB returned empty for tmdb_id={tmdb_id}")
+            logger.error(f"Failed to fetch TMDB details for person: {tmdb_id}")
+            return {}
         
         credits = await self.tmdb_client.get_person_combined_credits(tmdb_id)
+        
+        # Ensure credits have 'id' for the UI routing if missing
+        for c in credits:
+            if 'id' not in c and 'tmdb_id' in c:
+                c['id'] = str(c['tmdb_id'])
         
         # Separate Top Movies (popularity high) and Full Filmography
         details['top_credits'] = credits[:10]
@@ -543,7 +614,31 @@ class ContentService:
                 res = await self.db.execute(text("SELECT * FROM content WHERE tmdb_id = :id OR mal_id = :id"), {"id": int(content_id)})
                 row = res.mappings().one_or_none()
 
-            # 3. If still not found, it's a 404
+            # 3. If still not found, try live TMDB fetch if content_id is numeric
+            if not row and content_id.isdigit():
+                try:
+                    # We don't know if it's a movie or series yet, so we try discovery or specific lookup.
+                    # Usually, filmographies provide media_type, but here we only have the ID.
+                    # We'll try a generic search or assume it's a movie first, then series.
+                    logger.info(f"Content {content_id} not in DB. Attempting auto-import from TMDB.")
+                    
+                    # Try movie first
+                    ext_data = await self.tmdb_client.get_movie_details(int(content_id))
+                    content_type = 'movie'
+                    
+                    if not ext_data or not ext_data.get('title'):
+                        # Try series
+                        ext_data = await self.tmdb_client.get_series_details(int(content_id))
+                        content_type = 'series'
+                    
+                    if ext_data and (ext_data.get('title') or ext_data.get('name')):
+                        # Map and Upsert
+                        upserted = await self._upsert_tmdb_content([ext_data], returning=True)
+                        if upserted:
+                            row = upserted[0]
+                except Exception as e:
+                    logger.error(f"Auto-import failed for TMDB ID {content_id}: {e}")
+
             if not row: return None
             
             d = dict(row)
@@ -552,6 +647,9 @@ class ContentService:
             last_synced = d.get('last_synced_at')
             stale = not last_synced or (datetime.now() - last_synced.replace(tzinfo=None)).days > 7
             missing_info = not d.get('synopsis') or not d.get('genres')
+            if d.get('content_type') in ['series', 'anime', 'tv']:
+                if d.get('total_episodes') is None or d.get('total_seasons') is None:
+                    missing_info = True
             
             if (stale or missing_info) and d.get('tmdb_id'):
                 try:
@@ -562,94 +660,195 @@ class ContentService:
                 except Exception as sync_err:
                     logger.error(f"Sync failed for {content_id}: {sync_err}")
 
+            # Ensure description alias is present for the App
+            d['description'] = d.get('synopsis')
+            
             d['is_anticipated'] = bool(d.get('release_date') and d.get('release_date') > date.today())
             d['avg_star_rating'] = self._get_display_rating(d)
             d['cast'] = d.get('cast', [])
             
-            # Fetch user status if user_id is provided
-            if user_id:
-                status_res = await self.db.execute(text('''
-                    SELECT is_watched, is_liked, is_dropped, is_interested, watch_count, rating
-                    FROM user_content_status
-                    WHERE user_id = CAST(:uid AS UUID) AND content_id = :cid
-                '''), {'uid': user_id, 'cid': d['id']})
-                status = status_res.mappings().one_or_none()
-                if status:
-                    d['is_watched'] = status.get('is_watched', False)
-                    d['is_liked'] = status.get('is_liked', False)
-                    d['is_dropped'] = status.get('is_dropped', False)
-                    d['is_interested'] = status.get('is_interested', False)
-                    d['watch_count'] = status.get('watch_count', 0)
-                    d['user_rating'] = status.get('rating')
+            # Dynamic Rating Stats
+            d['vote_count'] = d.get('vote_count') or 0
+            d['rating_distribution'] = self._calculate_distribution(d['avg_star_rating'])
 
-            try:
-                resp = ContentResponse.model_validate(d)
-            except Exception as ve:
-                logger.error(f"Content validation failed for {content_id}: {ve}\nData: {d}")
-                raise
-            if not user_id:
-                await cache.set(cache_key, resp.model_dump(), ttl=CacheService.TTL_CONTENT)
+            # Rename database 'status' (release status) to 'release_status' to avoid conflict with user tracking status
+            if 'status' in d:
+                d['release_status'] = d.pop('status')
+            
+            # Map to response model
+            resp = ContentResponse.model_validate(d)
+            
+            # Add Series-specific metadata if available
+            if d.get('content_type') in ['series', 'anime', 'tv']:
+                resp.total_seasons = d.get('total_seasons') or d.get('number_of_seasons') or 1
+                resp.total_episodes = d.get('total_episodes') or d.get('number_of_episodes') or 0
+                # release_status is already set from pop above, but ensure it's not None
+                if not resp.release_status:
+                    resp.release_status = 'unknown'
+
+            # 5. Fetch user status if user_id is provided
+            if user_id:
+                try:
+                    # 5. Fetch main user status
+                    uid_obj = user_id if isinstance(user_id, UUID) else UUID(user_id)
+                    status_res = await self.db.execute(text('''
+                        SELECT 
+                            s.is_watched, s.is_liked, s.is_dropped, s.is_interested, s.watch_count, s.rating,
+                            s.status, s.progress_episodes, s.rewatch_count, s.last_activity_at,
+                            s.last_watched_season, s.last_watched_episode,
+                            EXISTS (SELECT 1 FROM calendar_alerts ca WHERE ca.user_id = :uid AND ca.content_id = :cid) as is_notified
+                        FROM user_content_status s
+                        WHERE s.user_id = :uid AND s.content_id = :cid
+                    '''), {'uid': uid_obj, 'cid': d['id']})
+                    row = status_res.mappings().one_or_none()
+                    
+                    if row:
+                        resp.is_watched = row['is_watched']
+                        resp.is_liked = row['is_liked']
+                        resp.is_dropped = row['is_dropped']
+                        resp.is_interested = row['is_interested']
+                        resp.is_notified = row['is_notified']
+                        resp.watch_count = row['watch_count']
+                        resp.user_rating = float(row['rating']) if row['rating'] is not None else None
+                        
+                        raw_status = row['status'] or 'none'
+                        resp.status = ContentStatus.COMPLETED if (raw_status == 'none' and row['is_watched']) else ContentStatus(raw_status)
+                        resp.progress_episodes = row['progress_episodes'] or 0
+                        resp.last_watched_season = row['last_watched_season'] or 0
+                        resp.last_watched_episode = row['last_watched_episode'] or 0
+                        resp.rewatch_count = row['rewatch_count'] or 0
+                        resp.last_activity_at = row['last_activity_at']
+                    else:
+                        # Check for notification even if no status row
+                        ca_res = await self.db.execute(text(
+                            "SELECT EXISTS (SELECT 1 FROM calendar_alerts WHERE user_id = :uid AND content_id = :cid)"
+                        ), {'uid': uid_obj, 'cid': d['id']})
+                        resp.is_notified = ca_res.scalar() or False
+
+                    # 6. Fetch Per-Season Status
+                    logger.info(f"DEBUG_SYNC: uid={user_id}, cid={d['id']}")
+
+                    # Fetch rows normally to be safe
+                    cid_obj = d['id'] if isinstance(d['id'], UUID) else UUID(d['id'])
+                    
+                    raw_rows_res = await self.db.execute(text("""
+                        SELECT s.sn as season_number, 
+                               COALESCE(uss.status, 'none') as status, 
+                               COALESCE(uss.progress_episodes, 0) as progress_episodes,
+                               COALESCE(
+                                   uss.total_episodes,
+                                   (
+                                       SELECT (elem->>'episode_count')::int 
+                                       FROM jsonb_array_elements(c.seasons) elem 
+                                       WHERE (elem->>'season_number')::int = s.sn 
+                                       LIMIT 1
+                                   ),
+                                   CASE 
+                                       WHEN :total_seasons > 0 THEN ceil(CAST(:total_episodes AS FLOAT) / :total_seasons)::int
+                                       ELSE 0 
+                                   END
+                               ) as total_episodes,
+                               uss.updated_at
+                        FROM (SELECT generate_series(1, COALESCE(:total_seasons, 1)) as sn) s
+                        CROSS JOIN content c
+                        LEFT JOIN user_season_status uss ON uss.content_id = c.id AND uss.user_id = :uid AND uss.season_number = s.sn
+                        WHERE c.id = :cid
+                        ORDER BY s.sn ASC
+                    """), {
+                        'uid': str(uid_obj), 
+                        'cid': str(cid_obj),
+                        'total_seasons': resp.total_seasons or 1,
+                        'total_episodes': resp.total_episodes or 0
+                    })
+                    
+                    rows = raw_rows_res.fetchall()
+                    logger.info(f"DEBUG_SYNC: Found {len(rows)} status rows for {cid_obj}")
+                    
+                    season_statuses = []
+                    for row in rows:
+                        season_statuses.append(SeasonStatusResponse(
+                            season_number=row[0],
+                            status=row[1],
+                            progress_episodes=row[2],
+                            total_episodes=row[3],
+                            updated_at=row[4]
+                        ))
+                    
+                    resp.season_statuses = season_statuses
+
+                except Exception as status_err:
+                    logger.error(f"Error fetching user status for {content_id}: {status_err}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+
             return resp
-        except Exception as e: 
+        except Exception as e:
             logger.error(f"Error getting content by id {content_id}: {e}")
             raise
 
     async def get_content_credits(self, content_id: str) -> List[Dict[str, Any]]:
         """Fetch cast and crew, using local DB if available, otherwise fallback to TMDB."""
-        print(f"DEBUG: get_content_credits for {content_id}")
         try:
-            # 1. Try local DB
+            # 1. Resolve content first (ensure we have a UUID and TMDB ID)
+            content = await self.get_content_by_id(content_id)
+            if not content: return []
+            
+            cid_uuid = content.id
+            tmdb_id = content.tmdb_id
+            content_type = content.content_type
+
+            # 2. Try local DB credits by UUID
             res = await self.db.execute(text('''
                 SELECT p.id, p.name, p.profile_image_url as profile_url, cc.role, cc.character_name as character, cc.job, cc.department
                 FROM content_credits cc
                 JOIN persons p ON p.id = cc.person_id
                 WHERE cc.content_id = :cid
                 ORDER BY cc.display_order ASC
-            '''), {'cid': content_id})
+            '''), {'cid': cid_uuid})
             rows = [dict(r) for r in res.mappings()]
-            if rows: 
-                print(f"DEBUG: Found {len(rows)} local credits")
-                return rows
+            if rows: return rows
 
-            # 2. If no local credits, fetch from TMDB
-            print("DEBUG: Fetching from TMDB...")
-            content_res = await self.db.execute(text("SELECT tmdb_id, content_type FROM content WHERE id = :id"), {"id": content_id})
-            content = content_res.mappings().one_or_none()
-            if not content or not content.get('tmdb_id'): 
-                print(f"DEBUG: Content not found or no tmdb_id: {content}")
-                return []
+            # 3. If no local credits, fetch from TMDB
+            if not tmdb_id: return []
 
-            tmdb_credits = await self.tmdb_client.get_credits(content['tmdb_id'], content['content_type'])
+            tmdb_credits = await self.tmdb_client.get_credits(tmdb_id, content_type)
             
-            # 3. Upsert persons and credits (Optimized: single transaction)
+            # 4. Upsert persons and credits
             all_credits = []
+            cid_str = str(cid_uuid)
             
             # Cast - Limit to top 25
             tmdb_cast = tmdb_credits.get('cast', [])[:25]
             for i, p in enumerate(tmdb_cast):
-                person_id = await self._upsert_person(p)
-                if person_id:
-                    await self._upsert_credit(content_id, person_id, 'cast', i, character=p.get('character'))
-                    p['role'] = 'cast'
-                    p['id'] = person_id
-                    all_credits.append(p)
+                try:
+                    person_id = await self._upsert_person(p)
+                    if person_id:
+                        await self._upsert_credit(cid_str, person_id, 'cast', i, character=p.get('character'))
+                        p['role'] = 'cast'
+                        p['id'] = person_id
+                        all_credits.append(p)
+                except Exception as p_err:
+                    logger.warning(f"Skipping cast member {p.get('name')} for {content_id}: {p_err}")
             
             # Crew - Filter by department and limit to 25
             tmdb_crew = tmdb_credits.get('crew', [])
             allowed_depts = {'Directing', 'Writing', 'Production'}
             crew_count = 0
             for i, p in enumerate(tmdb_crew):
-                if p.get('department') in allowed_depts:
-                    person_id = await self._upsert_person(p)
-                    if person_id:
-                        await self._upsert_credit(content_id, person_id, 'crew', i + 100, job=p.get('job'), department=p.get('department'))
-                        p['role'] = 'crew'
-                        p['id'] = person_id
-                        all_credits.append(p)
-                        crew_count += 1
-                        if crew_count >= 25: break
+                try:
+                    if p.get('department') in allowed_depts:
+                        person_id = await self._upsert_person(p)
+                        if person_id:
+                            await self._upsert_credit(cid_str, person_id, 'crew', i + 100, job=p.get('job'), department=p.get('department'))
+                            p['role'] = 'crew'
+                            p['id'] = person_id
+                            all_credits.append(p)
+                            crew_count += 1
+                            if crew_count >= 25: break
+                except Exception as c_err:
+                    logger.warning(f"Skipping crew member {p.get('name')} for {content_id}: {c_err}")
             
-            # Commit everything at once
+            # 5. Commit everything at once
             await self.db.commit()
             return all_credits
         except Exception as e:
@@ -657,14 +856,21 @@ class ContentService:
             logger.error(f"Error getting credits for {content_id}: {e}")
             return []
 
-    async def get_similar_content(self, content_id: str) -> List[ContentResponse]:
+    async def get_season_details(self, content_id: str, season_number: int) -> Dict[str, Any]:
+        """Fetch episodes for a specific season, proxying to TMDB."""
+        content = await self.get_content_by_id(content_id)
+        if not content or not content.tmdb_id:
+            return {"episodes": []}
+        
+        return await self.tmdb_client.get_season_details(content.tmdb_id, season_number)
+
+    async def get_similar_content(self, content_id: str) -> List[Dict[str, Any]]:
         """Fetch similar content from TMDB and upsert basic info."""
         try:
-            content_res = await self.db.execute(text("SELECT tmdb_id, content_type FROM content WHERE id = :id"), {"id": content_id})
-            content = content_res.mappings().one_or_none()
-            if not content or not content.get('tmdb_id'): return []
+            content = await self.get_content_by_id(content_id)
+            if not content or not content.tmdb_id: return []
 
-            similar_data = await self.tmdb_client.get_similar(content['tmdb_id'], content['content_type'])
+            similar_data = await self.tmdb_client.get_similar(content.tmdb_id, content.content_type)
             if not similar_data: return []
 
             # Limit to 10 items as requested
@@ -677,57 +883,47 @@ class ContentService:
 
     async def _upsert_person(self, p: Dict[str, Any]) -> Optional[str]:
         """Upsert a person into the persons table."""
-        try:
-            stmt = text('''
-                INSERT INTO persons (tmdb_id, name, profile_image_url, known_for_department)
-                VALUES (:tmdb_id, :name, :profile_image_url, :dept)
-                ON CONFLICT (tmdb_id) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    profile_image_url = EXCLUDED.profile_image_url,
-                    known_for_department = EXCLUDED.known_for_department,
-                    last_synced_at = now(),
-                    updated_at = now()
-                RETURNING id
-            ''')
-            res = await self.db.execute(stmt, {
-                'tmdb_id': p.get('tmdb_id') or p.get('id'),
-                'name': p.get('name'),
-                'profile_image_url': p.get('profile_url') or p.get('profile_path') or p.get('image_url'),
-                'dept': p.get('known_for_department')
-            })
-            row = res.mappings().one_or_none()
-            return str(row['id']) if row else None
-        except Exception as e:
-            await self.db.rollback()
-            logger.error(f"Error upserting person {p.get('name')}: {e}")
-            return None
+        stmt = text('''
+            INSERT INTO persons (tmdb_id, name, profile_image_url, known_for_department)
+            VALUES (:tmdb_id, :name, :profile_image_url, :dept)
+            ON CONFLICT (tmdb_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                profile_image_url = EXCLUDED.profile_image_url,
+                known_for_department = EXCLUDED.known_for_department,
+                last_synced_at = now(),
+                updated_at = now()
+            RETURNING id
+        ''')
+        res = await self.db.execute(stmt, {
+            'tmdb_id': p.get('tmdb_id') or p.get('id'),
+            'name': p.get('name'),
+            'profile_image_url': p.get('profile_url') or p.get('profile_path') or p.get('image_url'),
+            'dept': p.get('known_for_department')
+        })
+        row = res.mappings().one_or_none()
+        return str(row['id']) if row else None
 
     async def _upsert_credit(self, content_id: str, person_id: str, role: str, order: int, 
                              character: str = None, job: str = None, department: str = None):
         """Upsert a credit record."""
-        try:
-            stmt = text('''
-                INSERT INTO content_credits (content_id, person_id, role, character_name, job, department, display_order)
-                VALUES (:cid, :pid, :role, :char, :job, :dept, :order)
-                ON CONFLICT (content_id, person_id, role) DO UPDATE SET
-                    character_name = EXCLUDED.character_name,
-                    job = EXCLUDED.job,
-                    department = EXCLUDED.department,
-                    display_order = EXCLUDED.display_order
-            ''')
-            await self.db.execute(stmt, {
-                'cid': content_id,
-                'pid': person_id,
-                'role': role,
-                'char': character,
-                'job': job,
-                'dept': department,
-                'order': order
-            })
-            await self.db.commit()
-        except Exception as e:
-            await self.db.rollback()
-            logger.error(f"Error upserting credit for {content_id}/{person_id}: {e}")
+        stmt = text('''
+            INSERT INTO content_credits (content_id, person_id, role, character_name, job, department, display_order)
+            VALUES (CAST(:cid AS UUID), CAST(:pid AS UUID), :role, :char, :job, :dept, :order)
+            ON CONFLICT ON CONSTRAINT unique_content_person_role DO UPDATE SET
+                character_name = EXCLUDED.character_name,
+                job = EXCLUDED.job,
+                department = EXCLUDED.department,
+                display_order = EXCLUDED.display_order
+        ''')
+        await self.db.execute(stmt, {
+            'cid': content_id,
+            'pid': person_id,
+            'role': role,
+            'char': character,
+            'job': job,
+            'dept': department,
+            'order': order
+        })
 
 
     async def _populate_cast(self, items: List[Dict[str, Any]]):
@@ -787,12 +983,25 @@ class ContentService:
         if not content_ids: return
 
         res = await self.db.execute(text('''
-            SELECT content_id, is_watched, is_liked, is_dropped, is_interested, watch_count, rating
-            FROM user_content_status
-            WHERE user_id = :uid AND content_id = ANY(CAST(:ids AS UUID[]))
+            SELECT 
+                c_ids.id as content_id,
+                COALESCE(ucs.is_watched, false) as is_watched,
+                COALESCE(ucs.is_liked, false) as is_liked,
+                COALESCE(ucs.is_dropped, false) as is_dropped,
+                COALESCE(ucs.is_interested, false) as is_interested,
+                COALESCE(ucs.watch_count, 0) as watch_count,
+                ucs.rating as user_rating,
+                ucs.status,
+                ucs.progress_episodes,
+                ucs.rewatch_count,
+                ucs.last_activity_at,
+                (EXISTS (SELECT 1 FROM calendar_alerts ca WHERE ca.user_id = :uid AND ca.content_id = c_ids.id)) as is_notified
+            FROM (SELECT unnest(CAST(:ids AS UUID[])) as id) c_ids
+            LEFT JOIN user_content_status ucs ON ucs.content_id = c_ids.id AND ucs.user_id = :uid
         '''), {'uid': user_id, 'ids': content_ids})
         
         status_map = {str(r['content_id']): r for r in res.mappings()}
+
         for it in items:
             cid = str(it.get('id', '')) if isinstance(it, dict) else str(getattr(it, 'id', ''))
             status = status_map.get(cid, {})
@@ -801,12 +1010,27 @@ class ContentService:
                 if isinstance(obj, dict): obj[key] = val
                 else: setattr(obj, key, val)
 
-            set_val(it, 'is_watched', status.get('is_watched', False))
-            set_val(it, 'is_liked', status.get('is_liked', False))
-            set_val(it, 'is_dropped', status.get('is_dropped', False))
-            set_val(it, 'is_interested', status.get('is_interested', False))
-            set_val(it, 'watch_count', status.get('watch_count', 0))
-            set_val(it, 'user_rating', status.get('rating'))
+            set_val(it, 'is_watched', status.get('is_watched') or False)
+            set_val(it, 'is_liked', status.get('is_liked') or False)
+            set_val(it, 'is_dropped', status.get('is_dropped') or False)
+            set_val(it, 'is_interested', status.get('is_interested') or False)
+            set_val(it, 'is_notified', status.get('is_notified') or False)
+            set_val(it, 'watch_count', status.get('watch_count') or 0)
+            
+            # New Tracking Fields
+            # Fallback to 'completed' if is_watched is true (legacy sync)
+            raw_status = status.get('status') or 'none'
+            if raw_status == 'none' and (status.get('is_watched') or False):
+                raw_status = 'completed'
+                
+            set_val(it, 'status', ContentStatus(raw_status))
+            set_val(it, 'progress_episodes', status.get('progress_episodes') or 0)
+            set_val(it, 'rewatch_count', status.get('rewatch_count') or 0)
+            set_val(it, 'last_activity_at', status.get('last_activity_at'))
+
+            # Explicitly cast to float to avoid Decimal-as-string issues in JSON
+            val = status.get('rating')
+            set_val(it, 'user_rating', float(val) if val is not None else None)
 
     async def _upsert_tmdb_content(self, items: List[Dict[str, Any]], returning: bool = True, is_permanent: bool = False) -> List[Dict[str, Any]]:
         if not items: return []
@@ -816,8 +1040,8 @@ class ContentService:
             tid = it.get('tmdb_id')
             if tid and tid not in seen: seen.add(tid); u_items.append(it)
         stmt_text = '''
-            INSERT INTO content (tmdb_id, content_type, title, original_title, original_language, synopsis, poster_url, backdrop_url, external_rating, external_rating_source, release_date, genres, is_permanent, last_synced_at)
-            VALUES (:tmdb_id, :content_type, :title, :original_title, :original_language, :synopsis, :poster_url, :backdrop_url, :external_rating, :external_rating_source, :release_date, :genres, :is_permanent, now())
+            INSERT INTO content (tmdb_id, content_type, title, original_title, original_language, synopsis, poster_url, backdrop_url, external_rating, external_rating_source, vote_count, release_date, genres, is_permanent, total_episodes, total_seasons, seasons, last_synced_at)
+            VALUES (:tmdb_id, :content_type, :title, :original_title, :original_language, :synopsis, :poster_url, :backdrop_url, :external_rating, :external_rating_source, :vote_count, :release_date, :genres, :is_permanent, :total_episodes, :total_seasons, CAST(:seasons AS JSONB), now())
             ON CONFLICT (tmdb_id) DO UPDATE SET 
                 title = EXCLUDED.title, 
                 content_type = EXCLUDED.content_type,
@@ -825,8 +1049,12 @@ class ContentService:
                 poster_url = EXCLUDED.poster_url, 
                 backdrop_url = EXCLUDED.backdrop_url, 
                 external_rating = EXCLUDED.external_rating, 
+                vote_count = EXCLUDED.vote_count,
                 original_language = EXCLUDED.original_language,
                 genres = EXCLUDED.genres, 
+                total_episodes = EXCLUDED.total_episodes,
+                total_seasons = EXCLUDED.total_seasons,
+                seasons = EXCLUDED.seasons,
                 last_synced_at = now(),
                 is_permanent = content.is_permanent OR EXCLUDED.is_permanent
         '''
@@ -858,9 +1086,13 @@ class ContentService:
                 'backdrop_url': it.get('backdrop_url'), 
                 'external_rating': it.get('external_rating'), 
                 'external_rating_source': it.get('external_rating_source'), 
+                'vote_count': it.get('vote_count', 0),
                 'release_date': rd, 
                 'genres': it.get('genres', []),
-                'is_permanent': is_permanent
+                'is_permanent': is_permanent,
+                'total_episodes': it.get('total_episodes') or it.get('number_of_episodes'),
+                'total_seasons': it.get('total_seasons') or it.get('number_of_seasons'),
+                'seasons': json.dumps(it.get('seasons', []))
             })
         try:
             results = []

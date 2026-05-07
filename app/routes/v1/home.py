@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 from app.models.content import HomeTrendingResponse, CuratedContentResponse
 from app.models.common import ok
 
-from app.core.dependencies import get_current_user_id_optional
+from app.core.dependencies import get_current_user_id_optional, get_current_user_id
 from typing import List, Dict, Any, Optional
 
 router = APIRouter(tags=['home'])
@@ -50,3 +50,11 @@ async def get_hot_reviews(
 #     posters = await service.get_landing_posters(target_count=max(6, min(count, 20)))
 #     return ok({"posters": posters})
 
+@router.get('/continue-watching', response_model=Dict[str, Any])
+async def get_continue_watching(
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
+    service = ContentService(db)
+    items = await service.get_continue_watching(user_id)
+    return ok({"items": items})

@@ -20,12 +20,40 @@ class CollectionService:
         self.db = db
         self.action_service = ActionService(db)
 
-    async def get_user_collections(self, user_id: UUID) -> List[Dict]:
+    async def get_user_collections(self, user_id: UUID, viewer_id: Optional[UUID] = None) -> List[Dict]:
         res = await self.db.execute(text('''
-            SELECT * FROM collections 
-            WHERE user_id = :user_id 
-            ORDER BY is_pinned DESC, pin_order ASC, created_at DESC
-        '''), {'user_id': user_id})
+            SELECT c.*, 
+                   COALESCE(p.posters, '[]'::json) as preview_posters,
+                   COALESCE(tc.counts, '{"movies": 0, "series": 0, "anime": 0}'::json) as type_counts
+            FROM collections c
+            LEFT JOIN LATERAL (
+                SELECT 
+                    json_agg(sub.poster_url) as posters,
+                    json_agg(sub.backdrop_url) as backdrops
+                FROM (
+                    SELECT co.poster_url, co.backdrop_url
+                    FROM collection_items ci
+                    JOIN content co ON co.id = ci.content_id
+                    WHERE ci.collection_id = c.id
+                    AND (co.poster_url IS NOT NULL OR co.backdrop_url IS NOT NULL)
+                    ORDER BY ci.added_at DESC
+                    LIMIT 4
+                ) sub
+            ) p ON true
+            LEFT JOIN LATERAL (
+                SELECT json_build_object(
+                    'movies', COUNT(*) FILTER (WHERE co.content_type = 'movie'),
+                    'series', COUNT(*) FILTER (WHERE co.content_type = 'series'),
+                    'anime', COUNT(*) FILTER (WHERE co.content_type = 'anime')
+                ) as counts
+                FROM collection_items ci
+                JOIN content co ON co.id = ci.content_id
+                WHERE ci.collection_id = c.id
+            ) tc ON true
+            WHERE c.user_id = :user_id 
+            AND (c.visibility = 'public' OR c.user_id = CAST(:viewer_id AS UUID))
+            ORDER BY c.is_pinned DESC, c.pin_order ASC, c.created_at DESC
+        '''), {'user_id': user_id, 'viewer_id': str(viewer_id) if viewer_id else None})
         return [dict(row) for row in res.mappings()]
 
     async def create_collection(self, user_id: UUID, name: str, description: str = None, 

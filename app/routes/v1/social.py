@@ -123,6 +123,17 @@ async def get_comments(
     items = await service.get_comments(post_id, review_id, limit, offset)
     return ok(items)
 
+@router.delete('/comments/{comment_id}')
+async def delete_comment(
+    comment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
+    from app.models.common import ok
+    service = SocialService(db)
+    await service.delete_comment(UUID(user_id), comment_id)
+    return ok({"status": "success"})
+
 @router.post('/interactions/upvote')
 async def toggle_upvote(
     request: UpvoteRequest,

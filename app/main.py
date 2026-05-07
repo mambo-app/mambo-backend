@@ -17,7 +17,7 @@ from app.middleware.rate_limit import RateLimitMiddleware
 # Initialize structured logging before anything else
 configure_logging(level='INFO')
 
-from app.routes.v1 import auth, users, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media
+from app.routes.v1 import auth, users, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media, migration
 
 if settings.sentry_dsn:
     import sentry_sdk
@@ -42,17 +42,18 @@ async def lifespan(app: FastAPI):
 
     logger = logging.getLogger('mambo.scheduler')
 
-    # 1. Temporarily disabling schema init to bypass Render timeouts/locks
-    # from app.core.init_db import init_db, init_db_data_healing
-    # async with AsyncSessionLocal() as db:
-    #     logger.info("Initializing critical schemas at startup")
-    #     await init_db(db)
+    # 1. Critical schema init at startup
+    from app.core.init_db import init_db, init_db_data_healing
+    async with AsyncSessionLocal() as db:
+        logger.info("Initializing critical schemas at startup")
+        await init_db(db)
 
     # 2. Define background startup tasks
     async def run_global_healing():
         await asyncio.sleep(1200) # Start 20 minutes after boot
-        # Temporarily skipping healing as well to ensure clean start
-        pass
+        async with AsyncSessionLocal() as db:
+            await init_db_data_healing(db)
+        logger.info("Global data healing task completed")
 
     async def run_news_scheduler():
         await asyncio.sleep(900)
@@ -78,23 +79,39 @@ async def lifespan(app: FastAPI):
                     deleted_stale = await service.cleanup_stale_content(hours=24)
                     deleted_persons = await service.cleanup_stale_persons(hours=24)
                     deleted_activities = await service.cleanup_old_activities(days=7)
-                logger.info(f"Content cleanup cycle completed. Deleted {deleted_stale} stale items, {deleted_persons} stale persons, and {deleted_activities} old activities.")
+                    
+                    # 4. Cleanup old notifications
+                    from app.services.notification_service import NotificationService
+                    notif_service = NotificationService(db)
+                    deleted_notifs = await notif_service.cleanup_old_notifications(days=30)
+                    
+                logger.info(f"Content cleanup cycle completed. Deleted {deleted_stale} stale items, {deleted_persons} stale persons, {deleted_activities} old activities, and {deleted_notifs} old notifications.")
             except Exception as e:
                 logger.error(f"Content cleanup scheduler error: {e}")
             await asyncio.sleep(12 * 3600)  # 12 hours
             
-    scheduler_task = asyncio.create_task(run_news_scheduler())
-    cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
-    healing_task = asyncio.create_task(run_global_healing())
+    # 3. Only run maintenance tasks in production/staging to speed up local development reloads
+    if settings.app_env != 'development':
+        scheduler_task = asyncio.create_task(run_news_scheduler())
+        cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
+        healing_task = asyncio.create_task(run_global_healing())
+    else:
+        logger.info("Skipping maintenance tasks in development mode for faster startup")
+        scheduler_task = None
+        cleanup_task = None
+        healing_task = None
     
     yield
     
     # Cleanup
     try:
-        scheduler_task.cancel()
-        cleanup_task.cancel()
-        healing_task.cancel()
-        await asyncio.gather(scheduler_task, cleanup_task, healing_task, return_exceptions=True)
+        if scheduler_task: scheduler_task.cancel()
+        if cleanup_task: cleanup_task.cancel()
+        if healing_task: healing_task.cancel()
+        await asyncio.gather(
+            *[t for t in [scheduler_task, cleanup_task, healing_task] if t], 
+            return_exceptions=True
+        )
     except Exception:
         pass
     await engine.dispose()
@@ -141,6 +158,7 @@ app.include_router(recommendations.router, prefix='/v1/recommendations')
 app.include_router(social.router,          prefix='/v1/social')
 app.include_router(admin.router,         prefix='/v1/admin')
 app.include_router(media.router,         prefix='/v1/media')
+app.include_router(migration.router,     prefix='/v1/migration')
 
 # Backward-compatible aliases
 app.include_router(auth.router,          prefix='/auth')
@@ -177,3 +195,4 @@ async def health():
         'env': settings.app_env,
         'version': '1.0.1' 
     }
+# Reload Trigger

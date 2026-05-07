@@ -435,6 +435,40 @@ class TMDBClient:
                 logger.error(f"Error fetching Indian upcoming movies: {e}")
                 return []
 
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
+    async def get_movie_details(self, tmdb_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch full movie details."""
+        if not self.api_key: return None
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(
+                    f"{self.BASE_URL}/movie/{tmdb_id}",
+                    params={"api_key": self.api_key, "language": "en-US"},
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                return self._normalize_movie(resp.json())
+            except Exception as e:
+                logger.error(f"Error fetching movie details {tmdb_id}: {e}")
+                return None
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
+    async def get_series_details(self, tmdb_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch full TV series details."""
+        if not self.api_key: return None
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(
+                    f"{self.BASE_URL}/tv/{tmdb_id}",
+                    params={"api_key": self.api_key, "language": "en-US"},
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                return self._normalize_series(resp.json())
+            except Exception as e:
+                logger.error(f"Error fetching series details {tmdb_id}: {e}")
+                return None
+
     # TMDB Genre Mappings
     _GENRE_MAP_MOVIE = {
         28: "Action", 12: "Adventure", 16: "Animation", 35: "Comedy", 80: "Crime",
@@ -456,6 +490,7 @@ class TMDBClient:
         rd = item.get("release_date")
         
         return {
+            "id": str(item.get("id")),
             "tmdb_id": item.get("id"),
             "content_type": "movie",
             "title": item.get("title") or item.get("original_title", ""),
@@ -466,6 +501,7 @@ class TMDBClient:
             "backdrop_url": f"{self.BACKDROP_BASE}{backdrop}" if backdrop else None,
             "external_rating": item.get("vote_average"),
             "external_rating_source": "tmdb",
+            "vote_count": item.get("vote_count", 0),
             "release_date": rd if rd else None,
             "genres": genres
         }
@@ -478,6 +514,7 @@ class TMDBClient:
         rd = item.get("first_air_date")
 
         return {
+            "id": str(item.get("id")),
             "tmdb_id": item.get("id"),
             "content_type": "series",
             "title": item.get("name") or item.get("original_name", ""),
@@ -488,8 +525,18 @@ class TMDBClient:
             "backdrop_url": f"{self.BACKDROP_BASE}{backdrop}" if backdrop else None,
             "external_rating": item.get("vote_average"),
             "external_rating_source": "tmdb",
+            "vote_count": item.get("vote_count", 0),
             "release_date": rd if rd else None,
-            "genres": genres
+            "genres": genres,
+            "total_seasons": item.get("number_of_seasons", 1),
+            "total_episodes": item.get("number_of_episodes", 0),
+            "seasons": [
+                {
+                    "season_number": s.get("season_number"),
+                    "episode_count": s.get("episode_count")
+                } for s in item.get("seasons", []) if s.get("season_number", 0) > 0
+            ],
+            "status": item.get("status") # Returning, Ended, etc.
         }
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
@@ -599,6 +646,7 @@ class TMDBClient:
     def _normalize_person(self, p: dict, role_type: str) -> dict:
         profile = p.get("profile_path")
         return {
+            "id": str(p.get("id")),
             "tmdb_id": p.get("id"),
             "name": p.get("name"),
             "original_name": p.get("original_name"),
@@ -700,3 +748,40 @@ class TMDBClient:
             except Exception as e:
                 logger.error(f"TMDB get_person_combined_credits failed: {e}")
                 return []
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
+    async def get_season_details(self, tmdb_id: int, season_number: int) -> Dict[str, Any]:
+        """Fetch all episodes for a specific season."""
+        if not self.api_key: return {"episodes": []}
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(
+                    f"{self.BASE_URL}/tv/{tmdb_id}/season/{season_number}",
+                    params={"api_key": self.api_key, "language": "en-US"},
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                episodes = data.get("episodes", [])
+                
+                return {
+                    "season_number": data.get("season_number"),
+                    "name": data.get("name"),
+                    "overview": data.get("overview"),
+                    "episodes": [self._normalize_episode(e) for e in episodes]
+                }
+            except Exception as e:
+                logger.error(f"Error fetching season details for {tmdb_id} S{season_number}: {e}")
+                return {"episodes": []}
+
+    def _normalize_episode(self, e: dict) -> dict:
+        still = e.get("still_path")
+        return {
+            "episode_number": e.get("episode_number"),
+            "season_number": e.get("season_number"),
+            "title": e.get("name"),
+            "synopsis": e.get("overview"),
+            "air_date": e.get("air_date"),
+            "runtime": e.get("runtime"),
+            "thumbnail_url": f"{self.IMAGE_BASE}{still}" if still else None,
+            "vote_average": e.get("vote_average")
+        }

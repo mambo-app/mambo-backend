@@ -4,10 +4,11 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from app.models.action import ActionType, ContentActionRequest, ContentActionResponse
-from datetime import date
+from datetime import date, datetime
 from fastapi import HTTPException
-
 import uuid
+import math
+import json
 logger = get_logger('mambo.action')
 
 class ActionService:
@@ -104,6 +105,224 @@ class ActionService:
                 if req.rating is None:
                     raise HTTPException(status_code=400, detail="Rating value required for 'rate' action")
                 await self._handle_rate(user_id, content_id, req.rating)
+            elif req.action == ActionType.notify:
+                await self.db.execute(text('''
+                    INSERT INTO calendar_alerts (user_id, content_id)
+                    VALUES (:uid, :cid) ON CONFLICT DO NOTHING
+                '''), {'uid': user_id, 'cid': content_id})
+            elif req.action == ActionType.unnotify:
+                await self.db.execute(text('''
+                    DELETE FROM calendar_alerts WHERE user_id = :uid AND content_id = :cid
+                '''), {'uid': user_id, 'cid': content_id})
+            elif req.action == ActionType.set_status:
+                if not req.status:
+                    raise HTTPException(status_code=400, detail="Status value required for 'set_status' action")
+                
+                # 1. Update primary status
+                await self.db.execute(text('''
+                    INSERT INTO user_content_status (user_id, content_id, status, last_activity_at, updated_at)
+                    VALUES (:user_id, :content_id, :status, now(), now())
+                    ON CONFLICT (user_id, content_id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        last_activity_at = now(),
+                        updated_at = now()
+                '''), {'user_id': user_id, 'content_id': content_id, 'status': req.status})
+
+                # 2. Sync legacy flags for backward compatibility
+                if req.status == 'completed':
+                    await self._update_status_flag(user_id, content_id, 'is_watched', True)
+                    await self._sync_to_collection(user_id, content_id, 'Watched')
+                elif req.status == 'dropped':
+                    await self._update_status_flag(user_id, content_id, 'is_dropped', True)
+                    await self._sync_to_collection(user_id, content_id, 'Dropped')
+                elif req.status == 'plan_to_watch':
+                    await self._update_status_flag(user_id, content_id, 'is_interested', True)
+                    await self._sync_to_collection(user_id, content_id, 'Watchlist')
+                
+                # 3. Log activity based on status
+                activity_map = {
+                    'completed': 'watched',
+                    'dropped': 'dropped',
+                    'plan_to_watch': 'interested',
+                    'watching': 'watched'
+                }
+                act_type = activity_map.get(req.status, 'watched')
+                await self._log_activity(user_id, act_type, content_id=content_id, details={'status': req.status})
+            
+            elif req.action == ActionType.watch_episode:
+                if req.season_number is None or req.episode_number is None:
+                    raise HTTPException(status_code=400, detail="Season and Episode numbers required")
+                
+                # 1. Log episode watch
+                await self.db.execute(text('''
+                    INSERT INTO episode_watch_history (user_id, content_id, season_number, episode_number)
+                    VALUES (:uid, :cid, :sn, :en)
+                    ON CONFLICT (user_id, content_id, season_number, episode_number) DO UPDATE SET
+                        watched_at = now()
+                '''), {'uid': user_id, 'cid': content_id, 'sn': req.season_number, 'en': req.episode_number})
+
+                # 2. Update progress count (MAX of current progress or this episode)
+                # Season 0 Rule: Ignore Season 0 (Specials) for main progression
+                if req.season_number != 0:
+                    logger.info(f"Saving watch_episode for user {user_id}, content {content_id}: S{req.season_number} E{req.episode_number}")
+                    # 1. Update overall status
+                    logger.info(f"Saving watch_episode for user {user_id}, content {content_id}: S{req.season_number} E{req.episode_number}")
+                    await self.db.execute(text('''
+                        INSERT INTO user_content_status (user_id, content_id, progress_episodes, last_watched_season, last_watched_episode, status, last_activity_at, updated_at)
+                        VALUES (:uid, :cid, :en, :sn, :en, 'watching', now(), now())
+                        ON CONFLICT (user_id, content_id) DO UPDATE SET
+                            progress_episodes = GREATEST(user_content_status.progress_episodes, :en),
+                            last_watched_season = :sn,
+                            last_watched_episode = :en,
+                            status = CASE 
+                                        WHEN user_content_status.status IN ('none', 'plan_to_watch') THEN 'watching'
+                                        ELSE user_content_status.status
+                                     END,
+                            last_activity_at = now(),
+                            updated_at = now()
+                    '''), {'uid': user_id, 'cid': content_id, 'sn': req.season_number, 'en': req.episode_number})
+                    
+                    # Update PER-SEASON status (for Liquid Tracker)
+                    await self.db.execute(text('''
+                        INSERT INTO user_season_status (user_id, content_id, season_number, progress_episodes, status, updated_at)
+                        VALUES (:uid, :cid, :sn, :en, 'watching', now())
+                        ON CONFLICT (user_id, content_id, season_number) DO UPDATE SET
+                            progress_episodes = GREATEST(user_season_status.progress_episodes, :en),
+                            status = CASE 
+                                        WHEN user_season_status.status = 'completed' THEN 'completed'
+                                        ELSE 'watching'
+                                     END,
+                            updated_at = now()
+                    '''), {'uid': user_id, 'cid': content_id, 'sn': req.season_number, 'en': req.episode_number})
+
+                    # 3. Mark previous seasons as 'completed' if they aren't already
+                    if req.season_number > 1:
+                        await self.db.execute(text('''
+                             INSERT INTO user_season_status (user_id, content_id, season_number, status, updated_at)
+                             SELECT :uid, :cid, s.sn, 'completed', now()
+                             FROM (SELECT generate_series(1, :sn - 1) as sn) s
+                             ON CONFLICT (user_id, content_id, season_number) DO UPDATE SET
+                                 status = 'completed',
+                                 updated_at = now()
+                             WHERE user_season_status.status != 'completed'
+                         '''), {'uid': user_id, 'cid': content_id, 'sn': req.season_number})
+                    
+                    # 4. Trigger progression recalculation (Auto-completes if needed)
+                    await self._recalculate_series_progression(user_id, content_id)
+                else:
+                    # For Season 0, we still ensure status is 'watching' if it was 'none'
+                    await self.db.execute(text('''
+                        INSERT INTO user_content_status (user_id, content_id, status, last_activity_at, updated_at)
+                        VALUES (:uid, :cid, 'watching', now(), now())
+                        ON CONFLICT (user_id, content_id) DO UPDATE SET
+                            status = CASE 
+                                        WHEN user_content_status.status IN ('none', 'plan_to_watch') THEN 'watching'
+                                        ELSE user_content_status.status
+                                     END,
+                            last_activity_at = now(),
+                            updated_at = now()
+                    '''), {'uid': user_id, 'cid': content_id})
+
+                await self._log_activity(user_id, 'watched', content_id=content_id, 
+                                        details={'season': req.season_number, 'episode': req.episode_number})
+                
+                # Update Streak
+                await self._update_streak(user_id)
+
+            elif req.action == ActionType.increment_progress:
+                # Increment current progress by 1
+                # We join with content to check total_episodes for auto-completion
+                res = await self.db.execute(text('''
+                    WITH updated AS (
+                        UPDATE user_content_status
+                        SET 
+                            progress_episodes = user_content_status.progress_episodes + 1,
+                            last_watched_episode = user_content_status.last_watched_episode + 1,
+                            last_activity_at = now(),
+                            updated_at = now()
+                        WHERE user_id = :uid AND content_id = :cid
+                        RETURNING progress_episodes, content_id
+                    )
+                    SELECT u.progress_episodes, c.total_episodes
+                    FROM updated u
+                    JOIN content c ON c.id = u.content_id
+                '''), {'uid': user_id, 'cid': content_id})
+                
+                row = res.mappings().one_or_none()
+                if not row:
+                    # If no row exists yet, create one
+                    res = await self.db.execute(text('''
+                        INSERT INTO user_content_status (user_id, content_id, progress_episodes, last_watched_season, last_watched_episode, status, last_activity_at, updated_at)
+                        VALUES (:uid, :cid, 1, 1, 1, 'watching', now(), now())
+                        ON CONFLICT (user_id, content_id) DO UPDATE SET
+                            progress_episodes = user_content_status.progress_episodes + 1,
+                            last_watched_episode = user_content_status.last_watched_episode + 1,
+                            last_activity_at = now(),
+                            updated_at = now()
+                        RETURNING progress_episodes
+                    '''), {'uid': user_id, 'cid': content_id})
+                    new_progress = res.scalar()
+                    total_ep = 0 # unknown here, but will be caught in subsequent updates
+                else:
+                    new_progress = row['progress_episodes']
+                    total_ep = row['total_episodes'] or 0
+
+                # Auto-complete if reached total
+                if total_ep > 0 and new_progress >= total_ep:
+                    await self.db.execute(text('''
+                        UPDATE user_content_status SET status = 'completed'
+                        WHERE user_id = :uid AND content_id = :cid
+                    '''), {'uid': user_id, 'cid': content_id})
+                    act_type = 'watched' # Log as full watch
+                else:
+                    # Ensure status is 'watching'
+                    await self.db.execute(text('''
+                        UPDATE user_content_status SET status = 'watching'
+                        WHERE user_id = :uid AND content_id = :cid AND status != 'watching'
+                    '''), {'uid': user_id, 'cid': content_id})
+                    act_type = 'watched' # episode watched
+
+                # Update Streak
+                await self._update_streak(user_id)
+                
+                # Recalculate series progression
+                await self._recalculate_series_progression(user_id, content_id)
+
+            elif req.action == ActionType.complete_season:
+                if req.season_number is None:
+                    raise HTTPException(status_code=400, detail="Season number required")
+                
+                # We assume the UI sends the last episode number of the season if available
+                # or we just update the season marker
+                last_ep = req.episode_number or 1 # fallback
+                
+                await self.db.execute(text('''
+                    INSERT INTO user_content_status (user_id, content_id, last_watched_season, last_watched_episode, status, last_activity_at, updated_at)
+                    VALUES (:uid, :cid, :sn, :en, 'watching', now(), now())
+                    ON CONFLICT (user_id, content_id) DO UPDATE SET
+                        last_watched_season = GREATEST(user_content_status.last_watched_season, :sn),
+                        last_watched_episode = CASE 
+                                                WHEN EXCLUDED.last_watched_season > user_content_status.last_watched_season THEN :en
+                                                ELSE GREATEST(user_content_status.last_watched_episode, :en)
+                                               END,
+                        updated_at = now()
+                '''), {'uid': user_id, 'cid': content_id, 'sn': req.season_number, 'en': last_ep})
+                
+                # Update PER-SEASON status to COMPLETED
+                await self.db.execute(text('''
+                    INSERT INTO user_season_status (user_id, content_id, season_number, progress_episodes, status, updated_at)
+                    VALUES (:uid, :cid, :sn, :en, 'completed', now())
+                    ON CONFLICT (user_id, content_id, season_number) DO UPDATE SET
+                        progress_episodes = GREATEST(user_season_status.progress_episodes, :en),
+                        status = 'completed',
+                        updated_at = now()
+                '''), {'uid': user_id, 'cid': content_id, 'sn': req.season_number, 'en': last_ep})
+                
+                await self._log_activity(user_id, 'watched', content_id=content_id, 
+                                        details={'season': req.season_number, 'action': 'season_completed'})
+                
+                # Recalculate series progression
+                await self._recalculate_series_progression(user_id, content_id)
 
             await self.db.commit()
             return ContentActionResponse(
@@ -251,6 +470,9 @@ class ActionService:
         activity_type = 'watched' if old_count == 0 else 'rewatched'
         # Check if a rating was provided in the context (though usually watch and rate are separate)
         await self._log_activity(user_id, activity_type, content_id=content_id)
+
+        # 6. Update Streak
+        await self._update_streak(user_id)
 
     async def _handle_rate(self, user_id: UUID, content_id: UUID, rating: float):
         # 1. Update status flag and rating (Latest Status)
@@ -429,3 +651,193 @@ class ActionService:
                     WHERE id = :cid
                 '''), {'cid': coll_id})
 
+    async def _check_badges(self, user_id: UUID):
+        """Evaluates user milestones and awards badges."""
+        import json
+        # 1. Fetch user stats
+        res = await self.db.execute(text('''
+            SELECT total_watched, badges FROM user_stats WHERE user_id = :uid
+        '''), {'uid': user_id})
+        row = res.mappings().one_or_none()
+        if not row: return
+        
+        current_badges = row['badges'] or []
+        if isinstance(current_badges, str):
+            current_badges = json.loads(current_badges)
+            
+        new_badges = list(current_badges)
+        earned_new = False
+        
+        # BADGE: Binge Monster (Watch 5 episodes in a day)
+        if "Binge Monster" not in [b.get('name') for b in new_badges]:
+            ep_res = await self.db.execute(text('''
+                SELECT count(*) FROM episode_watch_history 
+                WHERE user_id = :uid AND watched_at > now() - interval '24 hours'
+            '''), {'uid': user_id})
+            if ep_res.scalar() >= 5:
+                new_badges.append({
+                    "name": "Binge Monster",
+                    "description": "Watched 5+ episodes in 24 hours!",
+                    "earned_at": datetime.now().isoformat()
+                })
+                earned_new = True
+
+        # BADGE: Anime Addict (Complete 10 anime)
+        if "Anime Addict" not in [b.get('name') for b in new_badges]:
+            anime_res = await self.db.execute(text('''
+                SELECT count(*) FROM user_content_status ucs
+                JOIN content c ON c.id = ucs.content_id
+                WHERE ucs.user_id = :uid AND ucs.status = 'completed' AND c.content_type = 'anime'
+            '''), {'uid': user_id})
+            if anime_res.scalar() >= 10:
+                new_badges.append({
+                    "name": "Anime Addict",
+                    "description": "Completed 10+ Anime series!",
+                    "earned_at": datetime.now().isoformat()
+                })
+                earned_new = True
+
+        if earned_new:
+            await self.db.execute(text('''
+                UPDATE user_stats SET badges = :badges WHERE user_id = :uid
+            '''), {'badges': json.dumps(new_badges), 'uid': user_id})
+
+    async def _update_streak(self, user_id: UUID):
+        """Updates the user's daily watching streak."""
+        from uuid import UUID
+        from datetime import datetime, date, timedelta
+        
+        # 1. Fetch current streak info
+        res = await self.db.execute(text('''
+            SELECT current_streak, max_streak, last_streak_at 
+            FROM user_stats WHERE user_id = :uid
+        '''), {'uid': user_id})
+        stats = res.mappings().one_or_none()
+        
+        if not stats:
+            # Initialize stats if not present
+            await self.db.execute(text('''
+                INSERT INTO user_stats (user_id, current_streak, max_streak, last_streak_at)
+                VALUES (:uid, 1, 1, now())
+            '''), {'uid': user_id})
+            return
+
+        curr = stats['current_streak'] or 0
+        max_s = stats['max_streak'] or 0
+        last = stats['last_streak_at']
+        
+        today = date.today()
+        if last:
+            last_date = last.date()
+            if last_date == today:
+                return # Already updated today
+            elif last_date == today - timedelta(days=1):
+                # Streak continued!
+                curr += 1
+            else:
+                # Streak broken
+                curr = 1
+        else:
+            curr = 1
+            
+        new_max = max(max_s, curr)
+        
+        # 2. Update DB
+        await self.db.execute(text('''
+            UPDATE user_stats SET 
+                current_streak = :curr, 
+                max_streak = :max_s, 
+                last_streak_at = now(),
+                updated_at = now()
+            WHERE user_id = :uid
+        '''), {'curr': curr, 'max_s': new_max, 'uid': user_id})
+
+        # 3. Check for badges
+        await self._check_badges(user_id)
+    async def _recalculate_series_progression(self, user_id: UUID, content_id: UUID):
+        """
+        Check if all seasons are completed and update main series status.
+        Also handles auto-completion of seasons if progress matches total.
+        """
+        try:
+            # 1. Fetch seasons metadata and user's per-season progress
+            res = await self.db.execute(text('''
+                SELECT c.total_seasons, c.total_episodes, c.seasons,
+                       jsonb_agg(jsonb_build_object(
+                           'season_number', uss.season_number,
+                           'progress_episodes', uss.progress_episodes,
+                           'status', uss.status,
+                           'total_episodes', uss.total_episodes
+                       )) as user_statuses
+                FROM content c
+                LEFT JOIN user_season_status uss ON uss.content_id = c.id AND uss.user_id = :uid
+                WHERE c.id = :cid
+                GROUP BY c.id
+            '''), {'uid': user_id, 'cid': content_id})
+            
+            row = res.mappings().one_or_none()
+            if not row: return
+
+            total_seasons = row['total_seasons'] or 1
+            seasons_meta = row['seasons'] or [] 
+            user_statuses = row['user_statuses'] or []
+            
+            # Map metadata for quick lookup
+            meta_map = {s['season_number']: s['episode_count'] for s in seasons_meta if isinstance(s, dict)}
+            user_map = {s['season_number']: s for s in user_statuses if s and s.get('season_number') is not None}
+            
+            has_tracked_seasons = False
+            all_tracked_completed = True
+            max_tracked_season = 0
+            max_watched_episode = 0
+            
+            for sn in range(1, total_seasons + 1):
+                s_meta_total = meta_map.get(sn)
+                u_status = user_map.get(sn)
+                
+                s_progress = u_status['progress_episodes'] if u_status else 0
+                s_status = u_status['status'] if u_status else 'none'
+                s_total = u_status['total_episodes'] if (u_status and u_status.get('total_episodes')) else s_meta_total
+                
+                # Fallback to ceil(total/seasons) if no metadata
+                if s_total is None:
+                    s_total = math.ceil(row['total_episodes'] / total_seasons) if total_seasons > 0 else 0
+                
+                # Auto-complete season if progress >= total
+                if s_total > 0 and s_progress >= s_total and s_status != 'completed':
+                    await self.db.execute(text('''
+                        UPDATE user_season_status SET status = 'completed', updated_at = now()
+                        WHERE user_id = :uid AND content_id = :cid AND season_number = :sn
+                    '''), {'uid': user_id, 'cid': content_id, 'sn': sn})
+                    s_status = 'completed'
+
+                # If this season has been tracked by the user
+                if s_status not in ('none', None) or s_progress > 0:
+                    has_tracked_seasons = True
+                    max_tracked_season = max(max_tracked_season, sn)
+                    if s_status != 'completed':
+                        all_tracked_completed = False
+                
+                if s_progress > 0:
+                    if sn == max_tracked_season:
+                        max_watched_episode = max(max_watched_episode, s_progress)
+
+            # 2. Update main status
+            if has_tracked_seasons:
+                if all_tracked_completed:
+                    await self.db.execute(text('''
+                        UPDATE user_content_status 
+                        SET status = 'completed', is_watched = true, updated_at = now()
+                        WHERE user_id = :uid AND content_id = :cid
+                    '''), {'uid': user_id, 'cid': content_id})
+                    # Sync to collection
+                    await self._sync_to_collection(user_id, content_id, 'Watched')
+                else:
+                     # Only update to 'watching' if not already 'dropped'
+                     await self.db.execute(text('''
+                        UPDATE user_content_status 
+                        SET status = 'watching', updated_at = now()
+                        WHERE user_id = :uid AND content_id = :cid AND status != 'dropped'
+                    '''), {'uid': user_id, 'cid': content_id})
+        except Exception as e:
+            logger.error(f"Error recalculating progression for {content_id}: {e}")

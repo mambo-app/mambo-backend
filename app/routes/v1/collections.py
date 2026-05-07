@@ -116,10 +116,11 @@ async def remove_item_from_collection(
 
 @router.get('/item-status/{content_id}', response_model=Dict[str, Any])
 async def get_content_collection_status(
-    content_id: UUID,
+    content_id: str,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
+    print(f"DEBUG_ROUTE: Collection status check for {content_id}")
     service = CollectionService(db)
     collection_ids = await service.get_content_collection_status(UUID(user_id), content_id)
     return ok({"collection_ids": collection_ids})

@@ -75,6 +75,11 @@ def configure_logging(level: str = 'INFO') -> None:
     handler.setFormatter(StructuredFormatter())
     root.addHandler(handler)
 
+    # Add a file handler for debugging
+    file_handler = logging.FileHandler('mambo_debug.log', encoding='utf-8')
+    file_handler.setFormatter(StructuredFormatter())
+    root.addHandler(file_handler)
+
     # Silence noisy third-party loggers
     for noisy in ('httpx', 'httpcore', 'hpack', 'hpack.hpack', 'hpack.table', 'urllib3'):
         logging.getLogger(noisy).setLevel(logging.WARNING)

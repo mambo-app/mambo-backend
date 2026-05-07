@@ -216,7 +216,38 @@ class ChatService:
         if receiver_id:
             await ws_manager.send_personal_message(payload, str(receiver_id))
         await ws_manager.send_personal_message(payload, str(user_id))
-            
+
+        # Push Notification
+        if receiver_id and str(user_id) != str(receiver_id):
+            try:
+                # Fetch sender details for PFP/Name
+                sender_res = await self.db.execute(text(
+                    "SELECT username, avatar_url FROM profiles WHERE id = :id"
+                ), {'id': user_id})
+                sender = sender_res.mappings().one_or_none()
+                sender_name = sender.get('username') if sender else "Mambo"
+                sender_pfp = sender.get('avatar_url') if sender else None
+
+                from app.services.push_service import PushService
+                push_svc = PushService(self.db)
+                
+                # Truncate body for notification
+                preview = body[:100] + ('...' if len(body) > 100 else '')
+                
+                await push_svc.send_to_user(
+                    str(receiver_id),
+                    title=f"New Message from {sender_name}",
+                    body=preview,
+                    image_url=sender_pfp,
+                    data={
+                        "type": "chat_message",
+                        "conversation_id": str(conversation_id),
+                        "sender_id": str(user_id)
+                    }
+                )
+            except Exception as pe:
+                logger.error(f"Chat push failed: {pe}")
+
         return msg
 
     async def delete_message(self, user_id: str, message_id: str) -> bool:

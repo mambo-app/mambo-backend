@@ -36,12 +36,11 @@ class NotificationService:
         '''), {'user_id': user_id})
         total = count_res.scalar() or 0
 
-        # Get items
+        # Get items: Flatten actor details directly for the Flutter models
         res = await self.db.execute(text('''
             SELECT n.*, 
-                   p.username as actor_username, 
-                   p.display_name as actor_display_name, 
-                   p.avatar_url as actor_avatar_url
+                   p.display_name as actor_name, 
+                   p.avatar_url as actor_profile_url
             FROM notifications n
             LEFT JOIN profiles p ON p.id = n.actor_id
             WHERE n.user_id = CAST(:user_id AS UUID) AND n.is_deleted = false
@@ -52,16 +51,29 @@ class NotificationService:
         items = []
         for row in res.mappings():
             item = dict(row)
-            # Nest actor details if actor_id exists
-            if item.get('actor_id'):
-                item['actor'] = {
-                    'id': str(item['actor_id']),
-                    'username': item.get('actor_username'),
-                    'display_name': item.get('actor_display_name'),
-                    'avatar_url': item.get('actor_avatar_url')
-                }
+            # Ensure UUIDs/DateTimes are JSON serializable
+            if item.get('id'): item['id'] = str(item['id'])
+            if item.get('user_id'): item['user_id'] = str(item['user_id'])
+            if item.get('actor_id'): item['actor_id'] = str(item['actor_id'])
+            if item.get('related_id'): item['related_id'] = str(item['related_id'])
+            
             items.append(item)
         return items, total
+
+    async def cleanup_old_notifications(self, days: int = 30) -> int:
+        """Permanently delete notifications older than X days."""
+        query = text("""
+            DELETE FROM notifications 
+            WHERE created_at < now() - (interval '1 day' * :days)
+        """)
+        try:
+            res = await self.db.execute(query, {"days": days})
+            await self.db.commit()
+            return res.rowcount
+        except Exception as e:
+            await self.db.rollback()
+            logger.error(f"Failed to cleanup old notifications: {e}")
+            return 0
 
     async def get_unread_count(self, user_id: str) -> int:
         res = await self.db.execute(text('''
@@ -107,13 +119,38 @@ class NotificationService:
             
                 # Send Push Notification
                 try:
+                    # Fetch actor details for PFP
+                    image_url = None
+                    if data.get('actor_id'):
+                        actor_res = await self.db.execute(text(
+                            "SELECT username, avatar_url FROM profiles WHERE id = :id"
+                        ), {'id': data['actor_id']})
+                        actor = actor_res.mappings().one_or_none()
+                        if actor:
+                            image_url = actor.get('avatar_url')
+                            if not data.get('title'):
+                                # Default title with actor's name
+                                data['title'] = actor.get('username') or "Mambo"
+
                     push_svc = PushService(self.db)
                     title = data.get('title') or "New Notification"
-                    body = data.get('message') or "You have a new activity on Mambo"
-                    await push_svc.send_to_user(str(data['user_id']), title, body, {
+                    body = data.get('message') or "You have a new activity"
+                    
+                    # FCM Data payload must be strings
+                    payload = {
                         "type": str(data.get('type', 'general')),
                         "notification_id": str(new_id)
-                    })
+                    }
+                    if data.get('related_id'):
+                        payload['related_id'] = str(data['related_id'])
+
+                    await push_svc.send_to_user(
+                        str(data['user_id']), 
+                        title, 
+                        body, 
+                        image_url=image_url,
+                        data=payload
+                    )
                 except Exception as pe:
                     logger.error(f"Push notification failed: {pe}")
                     

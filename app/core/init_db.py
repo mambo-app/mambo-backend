@@ -149,6 +149,29 @@ async def init_db(db: AsyncSession):
     await add_col("notifications", "related_collection_id","UUID")
 
     await add_col("user_content_status", "favorite_order", "INTEGER")
+    await add_col("user_content_status", "status",           "TEXT DEFAULT 'none'")
+    await add_col("user_content_status", "progress_episodes","INTEGER DEFAULT 0")
+    await add_col("user_content_status", "rewatch_count",    "INTEGER DEFAULT 0")
+    await add_col("user_content_status", "last_activity_at", "TIMESTAMPTZ DEFAULT now()")
+
+    await add_col("user_stats", "current_streak", "INTEGER DEFAULT 0")
+    await add_col("user_stats", "max_streak",     "INTEGER DEFAULT 0")
+    await add_col("user_stats", "last_streak_at", "TIMESTAMPTZ")
+    await add_col("user_stats", "badges",          "JSONB DEFAULT '[]'::jsonb")
+
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.episode_watch_history (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+            content_id uuid NOT NULL REFERENCES public.content(id) ON DELETE CASCADE,
+            season_number integer NOT NULL,
+            episode_number integer NOT NULL,
+            rating float,
+            note text,
+            watched_at timestamptz DEFAULT now(),
+            UNIQUE(user_id, content_id, season_number, episode_number)
+        )
+    '''))
 
     try:
         await db.execute(text("ALTER TABLE public.notifications ALTER COLUMN title DROP NOT NULL"))
@@ -305,6 +328,16 @@ async def init_db(db: AsyncSession):
         )
     '''))
 
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.calendar_alerts (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+            content_id uuid NOT NULL REFERENCES public.content(id) ON DELETE CASCADE,
+            created_at timestamptz DEFAULT now(),
+            UNIQUE(user_id, content_id)
+        )
+    '''))
+
     await add_col("collections", "pin_order", "INTEGER DEFAULT 0")
 
     await db.commit()
@@ -350,9 +383,33 @@ async def init_db_data_healing(db: AsyncSession):
         await db.commit()
     except Exception as e:
         logger.warning(f"Backfill warning: {e}")
+    # 2. Tracking Status Migration (Phase 1)
+    try:
+        # Migrate Completed
+        await db.execute(text('''
+            UPDATE user_content_status 
+            SET status = 'completed', updated_at = now()
+            WHERE is_watched = true AND (status IS NULL OR status = 'none')
+        '''))
+        # Migrate Dropped
+        await db.execute(text('''
+            UPDATE user_content_status 
+            SET status = 'dropped', updated_at = now()
+            WHERE is_dropped = true AND (status IS NULL OR status = 'none')
+        '''))
+        # Migrate Plan to Watch (Interested)
+        await db.execute(text('''
+            UPDATE user_content_status 
+            SET status = 'plan_to_watch', updated_at = now()
+            WHERE is_interested = true AND (status IS NULL OR status = 'none')
+        '''))
+        logger.info("Tracking status migration completed.")
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"Status migration warning: {e}")
         await db.rollback()
 
-    # 2. Global Stats Healing
+    # 3. Global Stats Healing
     try:
         await db.execute(text('''
             INSERT INTO user_stats (user_id)

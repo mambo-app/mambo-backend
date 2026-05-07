@@ -14,11 +14,20 @@ class ActionType(str, Enum):
     recommend = 'recommend'
     rate = 'rate'
     review = 'review'
+    notify = 'notify'
+    unnotify = 'unnotify'
+    set_status = 'set_status'
+    watch_episode = 'watch_episode'
+    increment_progress = 'increment_progress'
+    complete_season = 'complete_season'
 
 class ContentActionRequest(BaseModel):
     action: ActionType
     # Optional metadata if needed for specific actions
     rating: Optional[float] = None
+    status: Optional[str] = None
+    season_number: Optional[int] = None
+    episode_number: Optional[int] = None
 
 class ContentActionResponse(BaseModel):
     status: str

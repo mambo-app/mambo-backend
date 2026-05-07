@@ -9,12 +9,18 @@ class ReviewCreateRequest(BaseModel):
     text_review: Optional[str] = None
     contains_spoiler: bool = False
     tags: List[str] = []
+    tagged_seasons: List[int] = []
+    tagged_episodes: List[int] = []
+    review_type: str = "overall"
 
 class ReviewUpdateRequest(BaseModel):
     star_rating: Optional[float] = Field(None, ge=1, le=10)
     text_review: Optional[str] = None
     contains_spoiler: Optional[bool] = None
     tags: Optional[List[str]] = None
+    tagged_seasons: Optional[List[int]] = None
+    tagged_episodes: Optional[List[int]] = None
+    review_type: Optional[str] = None
 
 class ReviewResponse(BaseModel):
     id: UUID

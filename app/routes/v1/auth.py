@@ -8,11 +8,42 @@ from app.models.common import ok
 router = APIRouter()
 
 class RegisterRequest(BaseModel):
-    username: str = Field(..., min_length=6, max_length=30, pattern=r"^[a-zA-Z0-9_]+$")
+    username: str = Field(..., min_length=4, max_length=30, pattern=r"^[a-zA-Z0-9_]+$")
     email: EmailStr
-    phone: str = Field(..., pattern=r"^\d{10}$")
+    phone: str | None = Field(None, pattern=r"^\d{10}$")
     password: str = Field(..., min_length=8)
-    invite_key: str
+
+class GoogleLoginRequest(BaseModel):
+    id_token: str
+
+@router.post('/google')
+async def google_login(
+    body: GoogleLoginRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.auth_service import AuthService
+    service = AuthService(db)
+    result = await service.login_with_google(body.id_token)
+    return ok(result)
+
+class FinalizeGoogleRequest(BaseModel):
+    username: str = Field(..., min_length=4, max_length=30, pattern=r"^[a-zA-Z0-9_]+$")
+    provisioning_token: str
+    password: str = Field(..., min_length=8)
+
+@router.post('/finalize-google')
+async def finalize_google(
+    body: FinalizeGoogleRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.auth_service import AuthService
+    service = AuthService(db)
+    result = await service.finalize_google_signup(
+        username=body.username,
+        provisioning_token=body.provisioning_token,
+        password=body.password
+    )
+    return ok(result)
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -38,7 +69,6 @@ async def register(
         email=body.email,
         phone=body.phone,
         password=body.password,
-        invite_key=body.invite_key
     )
     return ok(result)
 

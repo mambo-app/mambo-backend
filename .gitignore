@@ -24,3 +24,10 @@ test_db*.py
 test_notif.py
 fix_*.py
 convert_utf8.py
+*.log
+.vscode/
+.idea/
+build/
+dist/
+*.bak
+*.swp

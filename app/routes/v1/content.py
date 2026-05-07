@@ -32,9 +32,15 @@ async def perform_content_action(
     user_id_str: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db)
 ):
+    from app.services.content_service import ContentService
     try:
         user_id = UUID(user_id_str)
-        content_uuid = UUID(content_id)
+        # Resolve content_id (could be UUID or TMDB/MAL ID)
+        content_svc = ContentService(db)
+        content = await content_svc.get_content_by_id(content_id, user_id_str)
+        if not content:
+            raise HTTPException(status_code=404, detail="Content not found")
+        content_uuid = content.id
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid User ID or Content ID format")
 
@@ -70,7 +76,7 @@ async def get_similar_content(
 
 @router.get('/{content_id}/rating-history')
 async def get_content_rating_history(
-    content_id: UUID,
+    content_id: str,
     tab: str = 'all',
     limit: int = 20,
     offset: int = 0,
@@ -83,3 +89,15 @@ async def get_content_rating_history(
     vid = UUID(user_id) if user_id else None
     items = await service.get_content_rating_history(content_id, viewer_id=vid, tab=tab, limit=limit, offset=offset)
     return ok(items)
+
+@router.get('/{content_id}/season/{season_number}')
+async def get_season_details(
+    content_id: str,
+    season_number: int,
+    db: AsyncSession = Depends(get_db)
+):
+    from app.services.content_service import ContentService
+    from app.models.common import ok
+    service = ContentService(db)
+    data = await service.get_season_details(content_id, season_number)
+    return ok(data)

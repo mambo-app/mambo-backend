@@ -216,6 +216,18 @@ async def get_activity_feed(
     service = UserService(db)
     return ok(await service.get_activity(username, viewer_id))
 
+@router.get('/{username}/stats/wrapped')
+async def get_wrapped_stats(
+    username: str,
+    timeframe: str = 'year',
+    db: AsyncSession = Depends(get_db),
+    viewer_id: str | None = Depends(get_current_user_id_optional),
+):
+    from app.services.user_service import UserService
+    service = UserService(db)
+    stats = await service.get_wrapped_stats(username, timeframe, viewer_id)
+    return ok(stats)
+
 @router.get('/{username}/watch-history')
 async def get_user_watch_history(
     username: str,
@@ -269,6 +281,9 @@ async def get_received_recommendations(
 @router.get('/{username}/reviews')
 async def get_user_reviews(
     username: str,
+    limit: int = 50,
+    offset: int = 0,
+    sort: str = 'desc',
     db: AsyncSession = Depends(get_db),
     viewer_id: str | None = Depends(get_current_user_id_optional),
 ):
@@ -280,7 +295,13 @@ async def get_user_reviews(
     user = await u_svc.get_by_username(username, viewer_id=viewer_id)
     
     s_svc = SocialService(db)
-    reviews = await s_svc.get_user_reviews(UUID(str(user['id'])), viewer_id=viewer_id)
+    reviews = await s_svc.get_user_reviews(
+        UUID(str(user['id'])), 
+        viewer_id=viewer_id,
+        limit=limit,
+        offset=offset,
+        sort_order=sort
+    )
     return ok(reviews)
 
 @router.put('/me/privacy')

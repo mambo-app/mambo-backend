@@ -75,11 +75,16 @@ async def search_people(
     items = await service.search_people(query, limit)
     return ok({"items": items})
 
+from app.core.logger import get_logger
+logger = get_logger('mambo.router.discover')
+
 @router.get('/person/{person_id}', response_model=dict[str, Any])
 async def get_person_profile(
     person_id: str,
     db: AsyncSession = Depends(get_db),
 ):
+    logger.info(f"DEBUG_PROFILE_REQUEST: person_id={person_id}")
     service = ContentService(db)
     profile = await service.get_person_profile(person_id)
+    logger.info(f"DEBUG_PROFILE_RESPONSE: found={bool(profile)}")
     return ok(profile)
