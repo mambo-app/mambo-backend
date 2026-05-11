@@ -381,9 +381,12 @@ class SocialRepository(BaseRepository):
 
     async def get_review(self, review_id: UUID) -> dict | None:
         return await self.fetch_one('''
-            SELECT r.*, r.rating as star_rating, pr.username, pr.avatar_url, pr.is_verified
+            SELECT r.*, r.rating as star_rating, r.is_spoiler as contains_spoiler,
+                   pr.username, pr.avatar_url, pr.is_verified,
+                   c.title as content_title, c.poster_url as content_poster
             FROM reviews r
             JOIN profiles pr ON pr.id = r.user_id
+            LEFT JOIN content c ON c.id = r.content_id
             WHERE r.id = :id AND r.is_deleted = false
         ''', {'id': review_id})
 

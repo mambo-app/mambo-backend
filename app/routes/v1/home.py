@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.services.content_service import ContentService
@@ -28,7 +28,7 @@ async def get_spotlight(db: AsyncSession = Depends(get_db)):
 
 @router.get('/hot-reviews', response_model=Dict[str, Any])
 async def get_hot_reviews(
-    limit: int = 10,
+    limit: int = Query(10),
     db: AsyncSession = Depends(get_db)
 ):
     service = ContentService(db)

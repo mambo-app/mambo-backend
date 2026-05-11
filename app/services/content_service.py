@@ -586,7 +586,9 @@ class ContentService:
         result = await self.db.execute(text('''
             SELECT r.id, r.star_rating, r.text_review, r.likes_count, r.created_at, c.id as content_id, c.title as content_title, c.poster_url, c.content_type, p.id as author_id, p.username, p.display_name, p.avatar_url, p.is_verified
             FROM reviews r JOIN content c ON c.id = r.content_id JOIN profiles p ON p.id = r.user_id
-            WHERE r.is_deleted = false AND r.created_at > now() - interval '30 days' ORDER BY r.likes_count DESC, r.created_at DESC LIMIT :limit
+            WHERE r.is_deleted = false 
+            -- AND r.created_at > now() - interval '30 days' 
+            ORDER BY r.likes_count DESC, r.created_at DESC LIMIT :limit
         '''), {'limit': limit})
         return [dict(row) for row in result.mappings()]
 

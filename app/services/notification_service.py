@@ -158,3 +158,18 @@ class NotificationService:
             await self.db.rollback()
             logger.error(f"CRITICAL: Failed to create notification: {e}. Data provided: {data}")
             raise e
+    async def delete_notification(self, user_id: str, notification_id: str) -> bool:
+        "Mark a notification as deleted."
+        query = text("""
+            UPDATE notifications 
+            SET is_deleted = true, updated_at = now() 
+            WHERE user_id = CAST(:uid AS UUID) AND id = CAST(:nid AS UUID)
+        """)
+        try:
+            res = await self.db.execute(query, {'uid': user_id, 'nid': notification_id})
+            await self.db.commit()
+            return res.rowcount > 0
+        except Exception as e:
+            await self.db.rollback()
+            logger.error(f'Failed to delete notification {notification_id}: {e}')
+            return False

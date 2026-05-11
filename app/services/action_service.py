@@ -19,7 +19,7 @@ class ActionService:
         try:
             # 0. Fetch content details to check release date
             content_res = await self.db.execute(text(
-                "SELECT release_date FROM content WHERE id = :id"
+                "SELECT title, release_date FROM content WHERE id = :id"
             ), {"id": content_id})
             content = content_res.mappings().one_or_none()
             
@@ -110,6 +110,17 @@ class ActionService:
                     INSERT INTO calendar_alerts (user_id, content_id)
                     VALUES (:uid, :cid) ON CONFLICT DO NOTHING
                 '''), {'uid': user_id, 'cid': content_id})
+
+                # Create an actual notification so user sees it in their tray
+                from app.services.notification_service import NotificationService
+                ns = NotificationService(self.db)
+                await ns.create_notification({
+                    'user_id': user_id,
+                    'type': 'calendar_alert',
+                    'title': content['title'],
+                    'message': "is now tracked for release alerts.",
+                    'related_id': content_id
+                })
             elif req.action == ActionType.unnotify:
                 await self.db.execute(text('''
                     DELETE FROM calendar_alerts WHERE user_id = :uid AND content_id = :cid

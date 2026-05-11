@@ -99,3 +99,12 @@ async def notification_websocket(
                 pass
     except WebSocketDisconnect:
         ws_manager.disconnect(user_id, websocket)
+@router.delete('/{id}')
+async def delete_notification(
+    id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    service = NotificationService(db)
+    success = await service.delete_notification(user_id, str(id))
+    return ok({'success': success})

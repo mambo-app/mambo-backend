@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 class MamboException(Exception):
@@ -36,6 +37,16 @@ def register_exception_handlers(app: FastAPI):
         return JSONResponse(
             status_code=exc.status_code,
             content={'success': False, 'error': {'code': 'HTTP_ERROR', 'message': exc.detail}}
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        import logging
+        logger = logging.getLogger('mambo.exceptions')
+        logger.error(f"Validation error at {request.url.path}: {exc.errors()}")
+        return JSONResponse(
+            status_code=422,
+            content={'success': False, 'error': {'code': 'VALIDATION_ERROR', 'message': str(exc.errors())}}
         )
 
     @app.exception_handler(Exception)

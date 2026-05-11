@@ -20,8 +20,6 @@ configure_logging(level='INFO')
 from app.routes.v1 import auth, users, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media, migration
 
 if settings.sentry_dsn:
-    import sentry_sdk
-    from sentry_sdk.integrations.fastapi import FastApiIntegration
     sentry_sdk.init(
         dsn=settings.sentry_dsn,
         integrations=[FastApiIntegration(
@@ -90,13 +88,13 @@ async def lifespan(app: FastAPI):
                 logger.error(f"Content cleanup scheduler error: {e}")
             await asyncio.sleep(12 * 3600)  # 12 hours
             
-    # 3. Only run maintenance tasks in production/staging to speed up local development reloads
+    # 3. Only run maintenance tasks in production/staging
     if settings.app_env != 'development':
         scheduler_task = asyncio.create_task(run_news_scheduler())
         cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
         healing_task = asyncio.create_task(run_global_healing())
     else:
-        logger.info("Skipping maintenance tasks in development mode for faster startup")
+        logger.info("Maintenance tasks are DISABLED for local development")
         scheduler_task = None
         cleanup_task = None
         healing_task = None
@@ -129,7 +127,7 @@ app = FastAPI(
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(TimingMiddleware)
 app.add_middleware(RequestIDMiddleware)
-# app.add_middleware(RateLimitMiddleware)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.origins_list,

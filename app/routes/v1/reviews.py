@@ -10,18 +10,9 @@ from uuid import UUID
 
 router = APIRouter()
 
-@router.get('/{id}', response_model=Dict[str, Any])
-async def get_review(
-    id: UUID,
-    db: AsyncSession = Depends(get_db)
-):
-    service = SocialService(db)
-    result = await service.get_review(id)
-    return ok(result)
-
 @router.get('/trending', response_model=Dict[str, Any])
 async def get_trending_reviews(
-    limit: int = 10,
+    limit: int = Query(10, description="Number of items to fetch"),
     db: AsyncSession = Depends(get_db)
 ):
     service = SocialService(db)
@@ -35,6 +26,15 @@ async def get_review_of_the_day(
     service = SocialService(db)
     item = await service.get_review_of_the_day()
     return ok({"item": item})
+
+@router.get('/{id}', response_model=Dict[str, Any])
+async def get_review(
+    id: UUID,
+    db: AsyncSession = Depends(get_db)
+):
+    service = SocialService(db)
+    result = await service.get_review(id)
+    return ok(result)
 
 @router.post('/', response_model=Dict[str, Any])
 async def create_review(
