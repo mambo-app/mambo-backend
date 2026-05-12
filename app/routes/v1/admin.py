@@ -42,3 +42,15 @@ async def cleanup_temporary_data(db: AsyncSession = Depends(get_db)):
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post('/fix-notifications', dependencies=[Depends(verify_admin)])
+async def fix_notifications(db: AsyncSession = Depends(get_db)):
+    """Manual fix for notifications constraint — protected by admin secret."""
+    try:
+        await db.execute(text("ALTER TABLE public.notifications DROP CONSTRAINT IF EXISTS notifications_type_check"))
+        await db.execute(text("ALTER TABLE public.notifications ALTER COLUMN title DROP NOT NULL"))
+        await db.commit()
+        return {"status": "success", "message": "Notification constraint dropped and title made nullable."}
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))

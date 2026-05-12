@@ -36,3 +36,4 @@ async def export_data(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+

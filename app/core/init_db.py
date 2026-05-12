@@ -175,6 +175,8 @@ async def init_db(db: AsyncSession):
 
     try:
         await db.execute(text("ALTER TABLE public.notifications ALTER COLUMN title DROP NOT NULL"))
+        # Drop the restrictive type check that blocks new notification types
+        await db.execute(text("ALTER TABLE public.notifications DROP CONSTRAINT IF EXISTS notifications_type_check"))
     except Exception:
         await db.rollback()
 

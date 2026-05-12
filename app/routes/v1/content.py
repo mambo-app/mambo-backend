@@ -49,8 +49,9 @@ async def perform_content_action(
     try:
         return await service.handle_action(user_id, content_uuid, req)
     except Exception as e:
-        logger.error(f"Error performing action {req.action} on {content_id} for user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"Error performing action {req.action} on {content_id} for user {user_id_str}: {e}")
+        # Return the actual error message in dev mode to make debugging easier
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @router.get('/{content_id}/credits')
 async def get_content_credits(

@@ -241,9 +241,9 @@ async def get_user_watch_history(
     u_svc = UserService(db)
     user = await u_svc.get_by_username(username, viewer_id=viewer_id)
     
-    # Optional: check privacy settings for watch history
-    # if str(viewer_id) != str(user['id']) and user.get('watched_visibility') == 'private':
-    #     return ok([])
+    # Check privacy settings for watch history
+    if str(viewer_id) != str(user['id']) and user.get('watched_visibility') == 'private':
+        return ok([])
 
     service = ActionService(db)
     items = await service.get_user_watch_history(UUID(str(user['id'])), limit, offset)
