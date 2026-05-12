@@ -90,17 +90,11 @@ async def lifespan(app: FastAPI):
                 logger.error(f"Content cleanup scheduler error: {e}")
             await asyncio.sleep(12 * 3600)  # 12 hours
             
-    # 3. Only run maintenance tasks in production/staging to speed up local development reloads
-    # COMMENTED OUT FOR LOCAL DEVELOPMENT:
-    # if settings.app_env != 'development':
-    #     scheduler_task = asyncio.create_task(run_news_scheduler())
-    #     cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
-    #     healing_task = asyncio.create_task(run_global_healing())
-    # else:
-    logger.info("Maintenance tasks are DISABLED for local development")
-    scheduler_task = None
-    cleanup_task = None
-    healing_task = None
+    # 3. Background maintenance tasks
+    logger.info(f"Starting background maintenance tasks in {settings.app_env} mode")
+    scheduler_task = asyncio.create_task(run_news_scheduler())
+    cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
+    healing_task = asyncio.create_task(run_global_healing())
     
     yield
     
