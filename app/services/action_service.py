@@ -497,8 +497,8 @@ class ActionService:
         await self.db.execute(stmt, {'user_id': user_id, 'content_id': content_id, 'rating': rating})
         
         # 2. Update the MOST RECENT watch history entry with this rating
-        # This handles the "Late Rating" logic.
-        await self.db.execute(text('''
+        # If no entry exists (user rated without watching), CREATE ONE with type 'rating_only'
+        res = await self.db.execute(text('''
             UPDATE watch_history 
             SET rating = :rating 
             WHERE id = (
@@ -506,14 +506,31 @@ class ActionService:
                 WHERE user_id = :uid AND content_id = :cid 
                 ORDER BY watched_at DESC LIMIT 1
             )
+            RETURNING id
         '''), {'uid': user_id, 'cid': content_id, 'rating': rating})
+        
+        updated_row = res.mappings().one_or_none()
+        
+        if not updated_row:
+            # Create a "rating only" history entry so it shows in the Rating History screen
+            import uuid
+            await self.db.execute(text('''
+                INSERT INTO watch_history (id, user_id, content_id, rating, watch_type, watched_at)
+                VALUES (:id, :user_id, :content_id, :rating, 'rating_only', now())
+            '''), {
+                'id': uuid.uuid4(),
+                'user_id': user_id,
+                'content_id': content_id,
+                'rating': rating
+            })
 
         # 3. Log activity
         # Check if this content was already watched (to decide if rewatch badge)
         status_res = await self.db.execute(text(
             "SELECT watch_count FROM user_content_status WHERE user_id = :uid AND content_id = :cid"
         ), {"uid": user_id, "cid": content_id})
-        old_count = (status_res.mappings().one_or_none() or {}).get('watch_count', 0)
+        row_dict = status_res.mappings().one_or_none() or {}
+        old_count = row_dict.get('watch_count') or 0
         is_rewatch = old_count > 1
 
         await self._log_activity(
@@ -524,7 +541,7 @@ class ActionService:
             is_rewatch=is_rewatch
         )
         
-        # 3. Invalidate cache
+        # 4. Invalidate cache
         from app.services.user_service import UserService
         u_svc = UserService(self.db)
         await u_svc.invalidate_profile_cache(str(user_id))
