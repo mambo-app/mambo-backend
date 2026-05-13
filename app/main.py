@@ -19,17 +19,15 @@ configure_logging(level='INFO')
 
 from app.routes.v1 import auth, users, reviews, posts, feed, notifications, home, admin, discover, content, news, chat, reports, collections, recommendations, social, media, migration
 
-# if settings.sentry_dsn:
-#     import sentry_sdk
-#     from sentry_sdk.integrations.fastapi import FastApiIntegration
-#     sentry_sdk.init(
-#         dsn=settings.sentry_dsn,
-#         integrations=[FastApiIntegration(
-#             transaction_style="endpoint",
-#         )],
-#         traces_sample_rate=0.1,
-#         profiles_sample_rate=0.1,
-#     )
+if settings.sentry_dsn:
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        integrations=[FastApiIntegration(
+            transaction_style="endpoint",
+        )],
+        traces_sample_rate=0.1,
+        profiles_sample_rate=0.1,
+    )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
