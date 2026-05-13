@@ -20,6 +20,7 @@ class ActionType(str, Enum):
     watch_episode = 'watch_episode'
     increment_progress = 'increment_progress'
     complete_season = 'complete_season'
+    untrack = 'untrack'
 
 class ContentActionRequest(BaseModel):
     action: ActionType

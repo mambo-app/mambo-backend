@@ -216,6 +216,22 @@ async def get_activity_feed(
     service = UserService(db)
     return ok(await service.get_activity(username, viewer_id))
 
+@router.get('/{username}/library')
+async def get_user_library(
+    username: str,
+    status: str | None = None,  # optional filter: 'watching', 'on_hold'
+    limit: int = 500,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    viewer_id: str | None = Depends(get_current_user_id_optional),
+):
+    """Returns all actively-tracked content for a user (watching + on_hold).
+    Reads from user_content_status (permanent) not activity_log (ephemeral).
+    Completed and dropped items are excluded — they live in collections."""
+    from app.services.user_service import UserService
+    service = UserService(db)
+    return ok(await service.get_library(username, viewer_id, status=status, limit=limit, offset=offset))
+
 @router.get('/{username}/stats/wrapped')
 async def get_wrapped_stats(
     username: str,

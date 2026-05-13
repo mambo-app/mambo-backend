@@ -125,6 +125,21 @@ class ActionService:
                 await self.db.execute(text('''
                     DELETE FROM calendar_alerts WHERE user_id = :uid AND content_id = :cid
                 '''), {'uid': user_id, 'cid': content_id})
+            elif req.action == ActionType.untrack:
+                # Just clear the status — does NOT touch collections or other flags (option A: non-destructive)
+                await self.db.execute(text('''
+                    UPDATE user_content_status
+                    SET status = 'none', last_activity_at = now(), updated_at = now()
+                    WHERE user_id = :uid AND content_id = :cid
+                '''), {'uid': user_id, 'cid': content_id})
+                
+                # Clear season statuses to ensure tracker modal resets fully
+                await self.db.execute(text('''
+                    UPDATE user_season_status
+                    SET status = 'none', updated_at = now()
+                    WHERE user_id = :uid AND content_id = :cid
+                '''), {'uid': user_id, 'cid': content_id})
+
             elif req.action == ActionType.set_status:
                 if not req.status:
                     raise HTTPException(status_code=400, detail="Status value required for 'set_status' action")
@@ -139,12 +154,21 @@ class ActionService:
                         updated_at = now()
                 '''), {'user_id': user_id, 'content_id': content_id, 'status': req.status})
 
+                if req.status == 'none':
+                    await self.db.execute(text('''
+                        UPDATE user_season_status
+                        SET status = 'none', updated_at = now()
+                        WHERE user_id = :uid AND content_id = :cid
+                    '''), {'uid': user_id, 'cid': content_id})
+
                 # 2. Sync legacy flags for backward compatibility
                 if req.status == 'completed':
                     await self._update_status_flag(user_id, content_id, 'is_watched', True)
+                    await self._update_status_flag(user_id, content_id, 'is_dropped', False)
                     await self._sync_to_collection(user_id, content_id, 'Watched')
                 elif req.status == 'dropped':
                     await self._update_status_flag(user_id, content_id, 'is_dropped', True)
+                    await self._update_status_flag(user_id, content_id, 'is_watched', False)
                     await self._sync_to_collection(user_id, content_id, 'Dropped')
                 elif req.status == 'plan_to_watch':
                     await self._update_status_flag(user_id, content_id, 'is_interested', True)
@@ -358,12 +382,25 @@ class ActionService:
         '''), {'content_id': content_id})
 
     async def _update_status_flag(self, user_id: UUID, content_id: UUID, flag_name: str, flag_value: bool):
+        # Auto-clear conflicting flags to satisfy DB check constraints
+        extra_sets = ""
+        if flag_value:
+            if flag_name == 'is_watched':
+                extra_sets = ", is_dropped = false"
+            elif flag_name == 'is_dropped':
+                extra_sets = ", is_watched = false"
+            elif flag_name == 'is_not_interested':
+                extra_sets = ", is_interested = false"
+            elif flag_name == 'is_interested':
+                extra_sets = ", is_not_interested = false"
+
         stmt = text(f'''
             INSERT INTO user_content_status (user_id, content_id, {flag_name})
             VALUES (:user_id, :content_id, :flag_value)
             ON CONFLICT (user_id, content_id) DO UPDATE SET
                 {flag_name} = :flag_value,
                 updated_at = now()
+                {extra_sets}
         ''')
         await self.db.execute(stmt, {
             'user_id': user_id,
@@ -435,10 +472,12 @@ class ActionService:
 
         # 2. Update status
         stmt_status = text('''
-            INSERT INTO user_content_status (user_id, content_id, is_watched, watch_count, first_watched_at, last_watched_at)
-            VALUES (:user_id, :content_id, true, :init_count, now(), now())
+            INSERT INTO user_content_status (user_id, content_id, is_watched, is_dropped, status, watch_count, first_watched_at, last_watched_at)
+            VALUES (:user_id, :content_id, true, false, 'completed', :init_count, now(), now())
             ON CONFLICT (user_id, content_id) DO UPDATE SET
                 is_watched = true,
+                is_dropped = false,
+                status = 'completed',
                 watch_count = CASE 
                                 WHEN user_content_status.is_watched = false THEN :init_count 
                                 ELSE user_content_status.watch_count + 1 
@@ -853,11 +892,22 @@ class ActionService:
             # 2. Update main status
             if has_tracked_seasons:
                 if all_tracked_completed:
+                    # Check if it was ALREADY completed to avoid duplicate activity logs
+                    status_check = await self.db.execute(text(
+                        "SELECT status FROM user_content_status WHERE user_id = :uid AND content_id = :cid"
+                    ), {'uid': user_id, 'cid': content_id})
+                    old_status = status_check.scalar()
+
                     await self.db.execute(text('''
                         UPDATE user_content_status 
-                        SET status = 'completed', is_watched = true, updated_at = now()
+                        SET status = 'completed', is_watched = true, is_dropped = false, updated_at = now()
                         WHERE user_id = :uid AND content_id = :cid
                     '''), {'uid': user_id, 'cid': content_id})
+                    
+                    # Log activity if it JUST became completed
+                    if old_status != 'completed':
+                        await self._log_activity(user_id, 'watched', content_id=content_id, details={'status': 'completed', 'trigger': 'auto_recalculation'})
+                    
                     # Sync to collection
                     await self._sync_to_collection(user_id, content_id, 'Watched')
                 else:

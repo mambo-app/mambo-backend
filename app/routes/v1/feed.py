@@ -45,11 +45,19 @@ async def get_recently_watched(
 ):
     # Fetch from activity_log where type is watch/rewatch
     query = '''
-        SELECT a.created_at as activity_at, c.*
-        FROM activity_log a
-        JOIN content c ON c.id = a.content_id
-        WHERE a.user_id = :uid AND a.activity_type IN ('watched', 'rewatched')
-        ORDER BY a.created_at DESC
+        WITH RankedActivities AS (
+            SELECT a.created_at as activity_at, c.*,
+                   ROW_NUMBER() OVER(PARTITION BY c.id ORDER BY a.created_at DESC) as rn
+            FROM activity_log a
+            JOIN content c ON c.id = a.content_id
+            JOIN user_content_status ucs ON ucs.content_id = c.id AND ucs.user_id = a.user_id
+            WHERE a.user_id = :uid 
+              AND a.activity_type IN ('watched', 'rewatched')
+              AND ucs.status = 'completed'
+        )
+        SELECT * FROM RankedActivities 
+        WHERE rn = 1
+        ORDER BY activity_at DESC
         LIMIT :limit
     '''
     res = await db.execute(text(query), {'uid': UUID(user_id), 'limit': limit})

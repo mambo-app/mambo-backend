@@ -384,6 +384,40 @@ class UserService:
         '''), {'username': username, 'is_owner': is_owner})
         return [dict(row) for row in result.mappings()]
 
+    async def get_library(self, username: str, viewer_id: str | None = None, status: str | None = None, limit: int = 500, offset: int = 0) -> list[dict]:
+        """Returns all actively-tracked content (watching + on_hold) from user_content_status.
+        This is the correct data source for the Library screen — permanent, never expires."""
+        profile = await self.get_by_username(username, viewer_id)
+        owner_id = str(profile['id'])
+
+        # Build status filter — default to watching + on_hold only
+        allowed_statuses = ['watching', 'on_hold']
+        if status and status in allowed_statuses:
+            status_filter = f"AND ucs.status = '{status}'"
+        else:
+            status_filter = "AND ucs.status IN ('watching', 'on_hold')"
+
+        result = await self.db.execute(text(f'''
+            SELECT
+                ucs.status as user_content_status,
+                ucs.status as activity_type,
+                ucs.last_activity_at as watched_at,
+                ucs.progress_episodes as episodes_watched,
+                CAST(c.id AS TEXT) as content_id,
+                c.title,
+                c.poster_url,
+                COALESCE(c.content_type, 'movie') as content_type,
+                c.total_episodes
+            FROM user_content_status ucs
+            JOIN content c ON c.id = ucs.content_id
+            WHERE ucs.user_id = CAST(:owner_id AS UUID)
+            {status_filter}
+            ORDER BY ucs.last_activity_at DESC NULLS LAST
+            LIMIT :limit OFFSET :offset
+        '''), {'owner_id': owner_id, 'limit': limit, 'offset': offset})
+        return [dict(row) for row in result.mappings()]
+
+
     async def get_liked_content(self, username: str, viewer_id: str | None = None) -> list[dict]:
         from app.repositories.user_repo import UserRepository
         repo = UserRepository(self.db)
