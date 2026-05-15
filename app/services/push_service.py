@@ -35,25 +35,19 @@ class PushService:
             for row in rows:
                 token = row[0]
                 try:
-                    # Construct Rich Notification
-                    notification = messaging.Notification(
-                        title=title,
-                        body=body,
-                        image=image_url
-                    )
-                    
-                    # Specific Android adjustments for Large Icon (PFP/Poster)
-                    android_config = messaging.AndroidConfig(
-                        notification=messaging.AndroidNotification(
-                            icon='stock_ticker_update', # Small icon
-                            color='#E50914', # Mambo Red
-                            large_icon=image_url if image_url else None
-                        )
-                    )
-
                     message = messaging.Message(
-                        notification=notification,
-                        android=android_config,
+                        notification=messaging.Notification(
+                            title=title,
+                            body=body,
+                            image=image_url
+                        ),
+                        android=messaging.AndroidConfig(
+                            priority='high',
+                            notification=messaging.AndroidNotification(
+                                icon='stock_ticker_update', # This is your App Logo
+                                color='#E50914', # Mambo Red
+                            )
+                        ),
                         data=data or {},
                         token=token,
                     )

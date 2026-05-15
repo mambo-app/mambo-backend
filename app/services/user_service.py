@@ -14,6 +14,7 @@ class UserService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
+
     async def upload_avatar(self, user_id: str, file_data: bytes, filename: str) -> str:
         import uuid
         file_ext = filename.split('.')[-1] if '.' in filename else 'jpg'
@@ -346,7 +347,6 @@ class UserService:
         if not is_owner:
             if visibility_setting == 'private':
                 return []
-            # TODO: Handle 'friends' visibility if SocialService is available here
         
         # 1. Cleanup old activity (> 7 days) as requested: "completely gone"
         await self.db.execute(text('''
@@ -389,6 +389,14 @@ class UserService:
         This is the correct data source for the Library screen — permanent, never expires."""
         profile = await self.get_by_username(username, viewer_id)
         owner_id = str(profile['id'])
+
+        # Privacy Check
+        is_owner = viewer_id == owner_id
+        visibility_setting = profile.get('library_visibility', 'public')
+        
+        if not is_owner:
+            if visibility_setting == 'private':
+                return []
 
         # Build status filter — default to watching + on_hold only
         allowed_statuses = ['watching', 'on_hold']
@@ -480,7 +488,9 @@ class UserService:
     async def update_privacy(self, user_id: str, data: dict) -> dict:
         from app.repositories.user_repo import UserRepository
         repo = UserRepository(self.db)
-        return await repo.update_privacy(user_id, data)
+        result = await repo.update_privacy(user_id, data)
+        await self.invalidate_profile_cache(user_id)
+        return result
 
     async def update_genres(self, user_id: str, genres: list[str]) -> list[str]:
         # Enforce 3-genre limit

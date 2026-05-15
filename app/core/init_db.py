@@ -38,10 +38,20 @@ async def init_db(db: AsyncSession):
     await add_col("profiles", "activity_visibility",         "TEXT DEFAULT 'public'")
     await add_col("profiles", "favourites_visibility",       "TEXT DEFAULT 'public'")
     await add_col("profiles", "reviews_visibility",          "TEXT DEFAULT 'public'")
+    await add_col("profiles", "library_visibility",          "TEXT DEFAULT 'public'")
     await add_col("profiles", "push_notifications_enabled",  "BOOLEAN DEFAULT true")
     await add_col("profiles", "search_vector",               "TSVECTOR")
     await add_col("profiles", "is_deleted",                  "BOOLEAN DEFAULT false")
     await add_col("profiles", "updated_at",                  "TIMESTAMPTZ DEFAULT now()")
+    
+    # --- Data Migration ---
+    try:
+        # Migration: set existing users to private library if not already set
+        await db.execute(text("UPDATE profiles SET library_visibility = 'public' WHERE library_visibility IS NULL"))
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"Migration error: {e}")
+        await db.rollback()
 
     await add_col("user_stats", "friends_count",   "INTEGER DEFAULT 0")
     await add_col("user_stats", "followers_count", "INTEGER DEFAULT 0")
@@ -104,10 +114,18 @@ async def init_db(db: AsyncSession):
     await add_col("collections", "is_default",       "BOOLEAN DEFAULT false")
     await add_col("collections", "is_deletable",     "BOOLEAN DEFAULT true")
     await add_col("collections", "item_count",       "INTEGER DEFAULT 0")
-    await add_col("collections", "visibility",       "TEXT DEFAULT 'private'")
+    await add_col("collections", "visibility",       "TEXT DEFAULT 'public'")
     await add_col("collections", "is_pinned",        "BOOLEAN DEFAULT false")
     await add_col("collections", "pin_order",        "INTEGER DEFAULT 0")
     await add_col("collections", "updated_at",       "TIMESTAMPTZ DEFAULT now()")
+    
+    # Migration: Set existing private collections to public (as per new policy)
+    try:
+        await db.execute(text("UPDATE collections SET visibility = 'public', is_public = true WHERE visibility = 'private'"))
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"Collection migration error: {e}")
+        await db.rollback()
 
     await add_col("collection_items", "added_by",  "UUID")
 

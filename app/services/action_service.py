@@ -389,10 +389,8 @@ class ActionService:
                 extra_sets = ", is_dropped = false"
             elif flag_name == 'is_dropped':
                 extra_sets = ", is_watched = false"
-            elif flag_name == 'is_not_interested':
-                extra_sets = ", is_interested = false"
             elif flag_name == 'is_interested':
-                extra_sets = ", is_not_interested = false"
+                pass # No conflicting flag for interest currently exists in schema
 
         stmt = text(f'''
             INSERT INTO user_content_status (user_id, content_id, {flag_name})

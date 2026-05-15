@@ -150,13 +150,17 @@ class UserRepository(BaseRepository):
 
     async def update_privacy(self, user_id: str, fields: dict) -> dict:
         set_clause = ', '.join([f'{k} = :{k}' for k in fields.keys()])
-        fields['user_id'] = user_id
-        return await self.execute_returning(f'''
+        # We need a copy of fields because we add user_id to it
+        params = dict(fields)
+        params['user_id'] = user_id
+        
+        await self.execute(f'''
             UPDATE profiles
             SET {set_clause}, updated_at = now()
             WHERE id = CAST(:user_id AS UUID)
-            RETURNING *
-        ''', fields)
+        ''', params)
+        
+        return await self.get_by_id(user_id)
 
     async def set_favorite_genres(self, user_id: str, genres: list[str]) -> None:
         await self.execute('DELETE FROM user_favorite_genres WHERE user_id = CAST(:user_id AS UUID)', {'user_id': user_id})
