@@ -283,8 +283,26 @@ class UserRepository(BaseRepository):
         return await self.fetch_many('''
             SELECT * FROM user_person_favorites 
             WHERE user_id = CAST(:uid AS UUID) AND is_actor = :is_actor
-            ORDER BY created_at DESC
+            ORDER BY favorite_order ASC NULLS LAST, created_at DESC
         ''', {'uid': user_id, 'is_actor': is_actor})
+
+    async def set_top_favorite_persons(self, user_id: str, person_ids: list[str], is_actor: bool) -> None:
+        # Reset all favorite_order first for the specific person type (actor or director)
+        await self.execute('''
+            UPDATE user_person_favorites 
+            SET favorite_order = NULL 
+            WHERE user_id = CAST(:uid AS UUID) AND is_actor = :is_actor
+        ''', {'uid': user_id, 'is_actor': is_actor})
+        
+        # Set new ones in order
+        for i, pid in enumerate(person_ids):
+            await self.execute('''
+                UPDATE user_person_favorites 
+                SET favorite_order = :order 
+                WHERE user_id = CAST(:uid AS UUID) AND person_id = :pid AND is_actor = :is_actor
+            ''', {'uid': user_id, 'pid': pid, 'order': i + 1, 'is_actor': is_actor})
+        
+        await self.db.commit()
 
     async def is_person_favorite(self, user_id: str, person_id: str) -> bool:
         res = await self.fetch_one('''

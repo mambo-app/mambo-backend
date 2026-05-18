@@ -777,6 +777,30 @@ class ContentService:
                         ))
                     
                     resp.season_statuses = season_statuses
+                    
+                    # 7. Fetch Friends Activity
+                    friends_res = await self.db.execute(text("""
+                        SELECT 
+                            p.id as user_id, p.username, p.display_name, p.avatar_url,
+                            ucs.status, ucs.rating
+                        FROM friends f
+                        JOIN profiles p ON (f.user_id1 = :uid AND p.id = f.user_id2) OR (f.user_id2 = :uid AND p.id = f.user_id1)
+                        JOIN user_content_status ucs ON ucs.user_id = p.id AND ucs.content_id = :cid
+                        WHERE (ucs.is_watched = true OR ucs.is_interested = true OR ucs.status != 'none')
+                        LIMIT 10
+                    """), {'uid': uid_obj, 'cid': cid_obj})
+                    
+                    from app.models.content import FriendActivityResponse
+                    resp.friends_activity = [
+                        FriendActivityResponse(
+                            user_id=r['user_id'],
+                            username=r['username'],
+                            display_name=r['display_name'],
+                            avatar_url=r['avatar_url'],
+                            status=r['status'],
+                            rating=float(r['rating']) if r['rating'] is not None else None
+                        ) for r in friends_res.mappings()
+                    ]
 
                 except Exception as status_err:
                     logger.error(f"Error fetching user status for {content_id}: {status_err}")

@@ -12,6 +12,14 @@ class ContentStatus(str, Enum):
     DROPPED = 'dropped'
     NONE = 'none'
 
+class FriendActivityResponse(BaseModel):
+    user_id: UUID
+    username: str
+    display_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    status: Optional[str] = None # e.g. 'completed', 'plan_to_watch'
+    rating: Optional[float] = None
+
 class CastMemberResponse(BaseModel):
     id: Optional[str] = None
     name: str
@@ -82,6 +90,8 @@ class ContentResponse(BaseModel):
     # Rating Distribution (Real or Simulated)
     vote_count: int = 0
     rating_distribution: List[float] = [0.0, 0.0, 0.0, 0.0, 0.0] # 1 to 5 stars
+    
+    friends_activity: List[FriendActivityResponse] = []
 
     class Config:
         from_attributes = True

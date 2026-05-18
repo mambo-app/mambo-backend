@@ -22,6 +22,10 @@ class UpdateProfileRequest(BaseModel):
 class TopFavoritesRequest(BaseModel):
     content_ids: list[str]
 
+class TopFavoritePersonsRequest(BaseModel):
+    person_ids: list[str]
+    is_actor: bool
+
 @router.get('/me')
 async def get_current_user_profile(
     db: AsyncSession = Depends(get_db),
@@ -124,6 +128,17 @@ async def set_top_favorites(
     service = UserService(db)
     await service.set_top_favorites(user_id, body.content_ids)
     return ok({"message": "Top favorites updated successfully"})
+
+@router.post('/me/favorites/person/order')
+async def set_top_favorite_persons(
+    body: TopFavoritePersonsRequest,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    from app.services.user_service import UserService
+    service = UserService(db)
+    await service.set_top_favorite_persons(user_id, body.person_ids, body.is_actor)
+    return ok({"message": "Top favorite persons updated successfully"})
 
 
 @router.post('/{username}/follow')

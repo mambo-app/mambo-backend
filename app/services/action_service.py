@@ -126,40 +126,28 @@ class ActionService:
                     DELETE FROM calendar_alerts WHERE user_id = :uid AND content_id = :cid
                 '''), {'uid': user_id, 'cid': content_id})
             elif req.action == ActionType.untrack:
-                # Just clear the status — does NOT touch collections or other flags (option A: non-destructive)
-                await self.db.execute(text('''
-                    UPDATE user_content_status
-                    SET status = 'none', last_activity_at = now(), updated_at = now()
-                    WHERE user_id = :uid AND content_id = :cid
-                '''), {'uid': user_id, 'cid': content_id})
-                
-                # Clear season statuses to ensure tracker modal resets fully
-                await self.db.execute(text('''
-                    UPDATE user_season_status
-                    SET status = 'none', updated_at = now()
-                    WHERE user_id = :uid AND content_id = :cid
-                '''), {'uid': user_id, 'cid': content_id})
+                # FULL RESET: Clear status, collections, and history
+                await self._revert_watch(user_id, content_id)
+                await self._remove_activity(user_id, ['watched', 'rewatched', 'dropped', 'interested'], content_id=content_id)
 
             elif req.action == ActionType.set_status:
                 if not req.status:
                     raise HTTPException(status_code=400, detail="Status value required for 'set_status' action")
                 
-                # 1. Update primary status
-                await self.db.execute(text('''
-                    INSERT INTO user_content_status (user_id, content_id, status, last_activity_at, updated_at)
-                    VALUES (:user_id, :content_id, :status, now(), now())
-                    ON CONFLICT (user_id, content_id) DO UPDATE SET
-                        status = EXCLUDED.status,
-                        last_activity_at = now(),
-                        updated_at = now()
-                '''), {'user_id': user_id, 'content_id': content_id, 'status': req.status})
-
                 if req.status == 'none':
+                    # Perform full reset
+                    await self._revert_watch(user_id, content_id)
+                    await self._remove_activity(user_id, ['watched', 'rewatched', 'dropped', 'interested'], content_id=content_id)
+                else:
+                    # 1. Update primary status
                     await self.db.execute(text('''
-                        UPDATE user_season_status
-                        SET status = 'none', updated_at = now()
-                        WHERE user_id = :uid AND content_id = :cid
-                    '''), {'uid': user_id, 'cid': content_id})
+                        INSERT INTO user_content_status (user_id, content_id, status, last_activity_at, updated_at)
+                        VALUES (:user_id, :content_id, :status, now(), now())
+                        ON CONFLICT (user_id, content_id) DO UPDATE SET
+                            status = EXCLUDED.status,
+                            last_activity_at = now(),
+                            updated_at = now()
+                    '''), {'user_id': user_id, 'content_id': content_id, 'status': req.status})
 
                 # 2. Sync legacy flags for backward compatibility
                 if req.status == 'completed':
@@ -655,10 +643,23 @@ class ActionService:
             UPDATE user_content_status 
             SET watch_count = 0,
                 is_watched = false,
+                status = 'none',
+                progress_episodes = 0,
+                last_watched_season = 0,
+                last_watched_episode = 0,
                 updated_at = now()
             WHERE user_id = :uid AND content_id = :cid
         '''), {'uid': user_id, 'cid': content_id})
         
+        # 2b. Clear season and episode progress
+        await self.db.execute(text('''
+            DELETE FROM user_season_status WHERE user_id = :uid AND content_id = :cid
+        '''), {'uid': user_id, 'cid': content_id})
+        
+        await self.db.execute(text('''
+            DELETE FROM episode_watch_history WHERE user_id = :uid AND content_id = :cid
+        '''), {'uid': user_id, 'cid': content_id})
+
         # 3. Delete ALL watch history for this content
         await self.db.execute(text('''
             DELETE FROM watch_history 

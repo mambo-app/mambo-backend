@@ -23,6 +23,9 @@ class CollectionCreateRequest(BaseModel):
     description: Optional[str] = None
     visibility: str = 'public'
 
+class CollectionReorderRequest(BaseModel):
+    collection_ids: List[UUID]
+
 class CollectionItemRequest(BaseModel):
     content_id: UUID
 

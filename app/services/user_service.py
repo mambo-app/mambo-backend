@@ -799,3 +799,9 @@ class UserService:
         from app.repositories.user_repo import UserRepository
         repo = UserRepository(self.db)
         return await repo.is_person_favorite(user_id, person_id)
+
+    async def set_top_favorite_persons(self, user_id: str, person_ids: list[str], is_actor: bool) -> None:
+        from app.repositories.user_repo import UserRepository
+        repo = UserRepository(self.db)
+        await repo.set_top_favorite_persons(user_id, person_ids, is_actor)
+        await self.invalidate_profile_cache(user_id)

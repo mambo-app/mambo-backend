@@ -52,7 +52,7 @@ class CollectionService:
             ) tc ON true
             WHERE c.user_id = :user_id 
             AND (c.visibility = 'public' OR c.user_id = CAST(:viewer_id AS UUID))
-            ORDER BY c.is_pinned DESC, c.pin_order ASC, c.created_at DESC
+            ORDER BY c.pin_order ASC NULLS LAST, c.created_at DESC
         '''), {'user_id': user_id, 'viewer_id': str(viewer_id) if viewer_id else None})
         return [dict(row) for row in res.mappings()]
 
@@ -106,6 +106,17 @@ class CollectionService:
         updated = dict(res.mappings().first())
         await self.db.commit()
         return updated
+
+    async def reorder_collections(self, user_id: UUID, collection_ids: List[UUID]) -> bool:
+        for idx, cid in enumerate(collection_ids):
+            # Also verify ownership
+            await self.db.execute(text('''
+                UPDATE collections 
+                SET pin_order = :order, updated_at = now() 
+                WHERE id = :cid AND user_id = :uid
+            '''), {'order': idx, 'cid': cid, 'uid': user_id})
+        await self.db.commit()
+        return True
 
     async def delete_collection(self, user_id: UUID, collection_id: UUID) -> bool:
         # Ownership check

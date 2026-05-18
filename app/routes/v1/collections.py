@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 from app.core.database import get_db
 from app.core.dependencies import get_current_user_id
 from app.models.common import ok
-from app.models.collection import CollectionResponse, CollectionCreateRequest, CollectionItemRequest, CollectionUpdateRequest
+from app.models.collection import CollectionResponse, CollectionCreateRequest, CollectionItemRequest, CollectionUpdateRequest, CollectionReorderRequest
 from app.services.collection_service import CollectionService
 from uuid import UUID
 
@@ -61,6 +61,16 @@ async def delete_collection(
     success = await service.delete_collection(UUID(user_id), id)
     if not success:
         raise HTTPException(status_code=403, detail="Not authorized to delete this collection or it is not deletable")
+    return ok({"success": True})
+
+@router.put('/reorder', response_model=Dict[str, Any])
+async def reorder_collections(
+    req: CollectionReorderRequest,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
+    service = CollectionService(db)
+    await service.reorder_collections(UUID(user_id), req.collection_ids)
     return ok({"success": True})
 
 @router.get('/{id}/items', response_model=Dict[str, Any])

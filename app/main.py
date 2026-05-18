@@ -42,12 +42,12 @@ async def lifespan(app: FastAPI):
 
     # 1. Critical schema init at startup (Production only)
     if settings.app_env != 'development':
-        from app.core.init_db import init_db, init_db_data_healing
+        from app.core.init_db import init_db
         async with AsyncSessionLocal() as db:
             logger.info("Initializing critical schemas at startup")
             await init_db(db)
     else:
-        logger.info("Schema initialization SKIPPED for local development")
+        logger.info("Schema initialization is FORCED OFF for local development")
 
     # 2. Define background startup tasks
     async def run_global_healing():
@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):
         cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
         healing_task = asyncio.create_task(run_global_healing())
     else:
-        logger.info("Maintenance tasks are DISABLED for local development")
+        logger.info("Maintenance tasks are FORCED OFF for local development")
         scheduler_task = None
         cleanup_task = None
         healing_task = None

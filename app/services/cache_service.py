@@ -73,6 +73,8 @@ class CacheService:
 
     @staticmethod
     async def get(key: str):
+        if settings.app_env == 'development':
+            return None
         try:
             if _is_async:
                 val = await _async_redis.get(key)
@@ -89,6 +91,8 @@ class CacheService:
 
     @staticmethod
     async def set(key: str, value, ttl: int):
+        if settings.app_env == 'development':
+            return
         try:
             serialized = json.dumps(value, default=str)
             if _is_async:
@@ -101,6 +105,8 @@ class CacheService:
 
     @staticmethod
     async def delete(key: str):
+        if settings.app_env == 'development':
+            return
         try:
             if _is_async:
                 await _async_redis.delete(key)
