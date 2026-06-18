@@ -66,7 +66,7 @@ class RecommendationService:
                 'user_id': recipient_id,
                 'actor_id': sender_id,
                 'type': 'recommendation',
-                'title': 'New Recommendation',
+                'title': content_title,
                 'message': f"{sender_name} recommended you {content_title}",
                 'related_id': content_id
             }

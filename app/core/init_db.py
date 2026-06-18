@@ -364,6 +364,29 @@ async def init_db(db: AsyncSession):
 
     await add_col("collections", "pin_order", "INTEGER DEFAULT 0")
 
+    # Optimize profiles email lookup
+    try:
+        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_profiles_email ON public.profiles(email)"))
+    except Exception as e:
+        logger.warning(f"idx_profiles_email error: {e}")
+        await db.rollback()
+
+    # Optimize content queries
+    try:
+        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_content_type_rating_sync ON public.content(content_type, external_rating DESC NULLS LAST, last_synced_at DESC NULLS LAST)"))
+        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_content_type_synced ON public.content(content_type, last_synced_at DESC NULLS LAST)"))
+        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_content_type_release ON public.content(content_type, release_date DESC NULLS LAST)"))
+    except Exception as e:
+        logger.warning(f"content index error: {e}")
+        await db.rollback()
+
+    # Optimize user_content_status query
+    try:
+        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_user_content_status_user_status_updated ON public.user_content_status(user_id, status, updated_at DESC)"))
+    except Exception as e:
+        logger.warning(f"user_content_status index error: {e}")
+        await db.rollback()
+
     await db.commit()
     logger.info("Critical schema initialization completed.")
 

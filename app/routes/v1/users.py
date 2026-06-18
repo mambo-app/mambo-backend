@@ -455,6 +455,18 @@ async def unblock_user(
     
     s_svc = SocialService(db)
     return ok(await s_svc.unblock_user(UUID(user_id), UUID(str(target['id']))))
+@router.get('/id/{user_id}')
+async def get_profile_by_id(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    viewer_id: str | None = Depends(get_current_user_id_optional),
+):
+    from app.services.user_service import UserService
+    service = UserService(db)
+    profile = await service.get_by_id(user_id)
+    username = profile['username']
+    full_profile = await service.get_by_username(username, viewer_id)
+    return ok(full_profile)
 
 @router.get('/{username}')
 async def get_profile(

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 from typing import List, Dict, Any, Optional
 from app.core.database import get_db
 from app.core.dependencies import get_current_user_id
@@ -90,6 +91,37 @@ async def get_collection_items(
     )
     return ok({"items": items})
 
+async def _resolve_content_id(content_id: str, db: AsyncSession, auto_import: bool = False) -> Optional[UUID]:
+    # 1. Try parsing as UUID
+    try:
+        return UUID(content_id)
+    except ValueError:
+        pass
+
+    # 2. Try resolving as TMDB / MAL ID
+    if content_id.isdigit():
+        res = await db.execute(
+            text("SELECT id FROM content WHERE tmdb_id = :id OR mal_id = :id"),
+            {"id": int(content_id)}
+        )
+        row = res.mappings().one_or_none()
+        if row:
+            return UUID(str(row['id']))
+        
+        # 3. If not found and auto_import is requested, import from TMDB
+        if auto_import:
+            from app.services.content_service import ContentService
+            content_service = ContentService(db)
+            try:
+                imported = await content_service.get_content_by_id(content_id)
+                if imported:
+                    return UUID(str(imported.id))
+            except Exception as e:
+                import logging
+                logging.getLogger('mambo.collections').error(f"Auto-import in router failed: {e}")
+                
+    return None
+
 @router.post('/{id}/items', response_model=Dict[str, Any])
 async def add_item_to_collection(
     id: UUID,
@@ -97,11 +129,15 @@ async def add_item_to_collection(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
+    content_uuid = await _resolve_content_id(req.content_id, db, auto_import=True)
+    if not content_uuid:
+        raise HTTPException(status_code=404, detail="Content not found and auto-import failed")
+
     service = CollectionService(db)
     success = await service.add_item_to_collection(
         user_id=UUID(user_id),
         collection_id=id,
-        content_id=req.content_id
+        content_id=content_uuid
     )
     if not success:
         raise HTTPException(status_code=403, detail="Not authorized to modify this collection or collection not found")
@@ -110,15 +146,20 @@ async def add_item_to_collection(
 @router.delete('/{id}/items/{content_id}', response_model=Dict[str, Any])
 async def remove_item_from_collection(
     id: UUID,
-    content_id: UUID,
+    content_id: str,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
+    content_uuid = await _resolve_content_id(content_id, db, auto_import=False)
+    if not content_uuid:
+        # If the content doesn't exist locally, it's already not in the collection
+        return ok({"success": True})
+
     service = CollectionService(db)
     success = await service.remove_item_from_collection(
         user_id=UUID(user_id),
         collection_id=id,
-        content_id=content_id
+        content_id=content_uuid
     )
     if not success:
         raise HTTPException(status_code=403, detail="Not authorized to modify this collection or item not found")
@@ -130,7 +171,11 @@ async def get_content_collection_status(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
-    print(f"DEBUG_ROUTE: Collection status check for {content_id}")
+    content_uuid = await _resolve_content_id(content_id, db, auto_import=False)
+    if not content_uuid:
+        # If the content doesn't exist locally, it cannot be in any collection
+        return ok({"collection_ids": []})
+
     service = CollectionService(db)
-    collection_ids = await service.get_content_collection_status(UUID(user_id), content_id)
+    collection_ids = await service.get_content_collection_status(UUID(user_id), content_uuid)
     return ok({"collection_ids": collection_ids})

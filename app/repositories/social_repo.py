@@ -44,9 +44,27 @@ class SocialRepository(BaseRepository):
 
     async def get_friends_list(self, user_id: UUID, limit: int = 20, offset: int = 0) -> list[dict]:
         return await self.fetch_many('''
-            SELECT p.id AS user_id, p.username, p.display_name, p.avatar_url, p.is_verified, f.created_at as friends_since
+            SELECT p.id AS user_id, p.username, p.display_name, p.avatar_url, p.is_verified, f.created_at as friends_since,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN 0
+                           WHEN now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN us.current_streak
+                           ELSE 0
+                       END, 
+                       0
+                   ) AS current_streak,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN false
+                           WHEN now() AT TIME ZONE 'UTC' >= date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '48 hours'
+                            AND now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN true
+                           ELSE false
+                       END, 
+                       false
+                   ) AS is_in_grace_period
             FROM friends f
             JOIN profiles p ON (p.id = f.user_id1 OR p.id = f.user_id2)
+            LEFT JOIN user_stats us ON us.user_id = p.id
             WHERE (f.user_id1 = :user_id OR f.user_id2 = :user_id)
             AND p.id != :user_id
             AND p.is_deleted = false

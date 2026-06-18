@@ -61,6 +61,22 @@ class MALClient:
             logger.error(f"Error fetching anime by genre {genre_id}: {e}")
             return []
 
+    async def get_current_season_anime(self, page: int = 1) -> List[Dict[str, Any]]:
+        """Fetch anime airing in the current season."""
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{self.JIKAN_URL}/seasons/now",
+                    params={"page": page, "limit": 25},
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return [self._normalize_jikan(item) for item in data.get("data", [])]
+        except Exception as e:
+            logger.error(f"Jikan current season failed: {e}")
+            return []
+
     async def get_upcoming_anime(self) -> List[Dict[str, Any]]:
         """Fetch seasonal/upcoming anime."""
         if self.client_id:

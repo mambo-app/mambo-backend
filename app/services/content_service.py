@@ -97,33 +97,33 @@ class ContentService:
         except Exception: pass
 
         async def _safe_fetch_movies() -> List[Dict[str, Any]]:
-            db_fallback_sql = "SELECT * FROM content WHERE content_type = 'movie' ORDER BY external_rating DESC NULLS LAST, last_synced_at DESC NULLS LAST LIMIT 5"
+            db_fallback_sql = "SELECT * FROM content WHERE content_type = 'movie' ORDER BY external_rating DESC NULLS LAST, last_synced_at DESC NULLS LAST LIMIT 20"
             try:
                 data = await self.tmdb_client.get_trending_movies(page=1)
                 if data:
-                    return await self._upsert_tmdb_content(data[:5])
+                    return await self._upsert_tmdb_content(data[:20])
             except Exception as e:
                 logger.error('tmdb_trending_failed', extra={'content_type': 'movie', 'error': str(e)})
             res = await self.db.execute(text(db_fallback_sql))
             return [dict(r) for r in res.mappings()]
 
         async def _safe_fetch_series() -> List[Dict[str, Any]]:
-            db_fallback_sql = "SELECT * FROM content WHERE content_type = 'series' ORDER BY external_rating DESC NULLS LAST, last_synced_at DESC NULLS LAST LIMIT 10"
+            db_fallback_sql = "SELECT * FROM content WHERE content_type = 'series' ORDER BY external_rating DESC NULLS LAST, last_synced_at DESC NULLS LAST LIMIT 20"
             try:
                 data = await self.tmdb_client.get_trending_series(page=1)
                 if data:
-                    return await self._upsert_tmdb_content(data[:5])
+                    return await self._upsert_tmdb_content(data[:20])
             except Exception as e:
                 logger.error('tmdb_trending_failed', extra={'content_type': 'series', 'error': str(e)})
             res = await self.db.execute(text(db_fallback_sql))
             return [dict(r) for r in res.mappings()]
 
         async def _safe_fetch_anime() -> List[Dict[str, Any]]:
-            db_fallback_sql = "SELECT * FROM content WHERE content_type = 'anime' ORDER BY external_rating DESC NULLS LAST, last_synced_at DESC NULLS LAST LIMIT 5"
+            db_fallback_sql = "SELECT * FROM content WHERE content_type = 'anime' ORDER BY external_rating DESC NULLS LAST, last_synced_at DESC NULLS LAST LIMIT 20"
             try:
                 data = await self.mal_client.get_trending_anime()
                 if data:
-                    return await self._upsert_mal_content(data[:5])
+                    return await self._upsert_mal_content(data[:20])
             except Exception as e:
                 logger.error('mal_trending_failed', extra={'error': str(e)})
             res = await self.db.execute(text(db_fallback_sql))
@@ -216,15 +216,20 @@ class ContentService:
             sql = 'SELECT COUNT(*) FROM content WHERE content_type = :ct'
             params: Dict[str, Any] = {'ct': content_type}
             if genre_filter:
-                sql += " AND genres @> ARRAY[:genre]::TEXT[]"
-                params['genre'] = genre_filter
+                aliases = [genre_filter]
+                if genre_filter == 'Sci-Fi':
+                    aliases.append('Science Fiction')
+                elif genre_filter == 'Science Fiction':
+                    aliases.append('Sci-Fi')
+                sql += " AND genres && CAST(:aliases AS TEXT[])"
+                params['aliases'] = aliases
             if min_rating is not None:
                 sql += " AND external_rating >= :r"
                 params['r'] = min_rating
             if future_only:
                 sql += " AND (release_date > CURRENT_DATE OR status = 'upcoming')"
             else:
-                sql += " AND last_synced_at > NOW() - INTERVAL '24 hours'"
+                sql += " AND last_synced_at > NOW() - INTERVAL '7 days'"
             res = await self.db.execute(text(sql), params)
             return res.scalar() or 0
 
@@ -232,8 +237,13 @@ class ContentService:
             sql = 'SELECT * FROM content WHERE content_type = :ct'
             params: Dict[str, Any] = {'ct': content_type, 'limit': limit}
             if genre_filter:
-                sql += " AND genres @> ARRAY[:genre]::TEXT[]"
-                params['genre'] = genre_filter
+                aliases = [genre_filter]
+                if genre_filter == 'Sci-Fi':
+                    aliases.append('Science Fiction')
+                elif genre_filter == 'Science Fiction':
+                    aliases.append('Sci-Fi')
+                sql += " AND genres && CAST(:aliases AS TEXT[])"
+                params['aliases'] = aliases
             if future_only:
                 sql += " AND (release_date > CURRENT_DATE OR status = 'upcoming')"
             if min_rating is not None:
@@ -261,12 +271,28 @@ class ContentService:
             if content_type == 'movie': 
                 fetch_tasks['popular'] = asyncio.gather(
                     self.tmdb_client.get_popular_movies(1), 
+                    self.tmdb_client.get_now_playing_movies(1),
+                    self.tmdb_client.get_now_playing_movies(2),
                     self.tmdb_client.get_indian_movies(1),
                     self.tmdb_client.get_indian_now_playing(1),
                     return_exceptions=True
                 )
-            elif content_type == 'series': fetch_tasks['popular'] = self.tmdb_client.get_popular_series(1)
-            else: fetch_tasks['popular'] = self.mal_client.get_top_anime()
+            elif content_type == 'series':
+                fetch_tasks['popular'] = asyncio.gather(
+                    self.tmdb_client.get_popular_series(1),
+                    self.tmdb_client.get_on_the_air_series(1),
+                    self.tmdb_client.get_on_the_air_series(2),
+                    self.tmdb_client.get_indian_series(1),
+                    return_exceptions=True
+                )
+            else:
+                fetch_tasks['popular'] = asyncio.gather(
+                    self.mal_client.get_top_anime(),
+                    self.mal_client.get_trending_anime(),
+                    self.mal_client.get_current_season_anime(1),
+                    self.mal_client.get_current_season_anime(2),
+                    return_exceptions=True
+                )
                 
         if await _db_fresh_count(min_rating=7.2) < CACHE_MIN:
             if content_type == 'movie': fetch_tasks['top_rated'] = asyncio.gather(self.tmdb_client.get_top_rated_movies(1), self.tmdb_client.get_indian_movies(1), return_exceptions=True)
@@ -341,6 +367,33 @@ class ContentService:
         top_db = await _db_query(limit=20, min_rating=7.2)
         ant_db = await _db_query(limit=50, future_only=True)
 
+        async def _db_latest_query(limit=30) -> List[Dict[str, Any]]:
+            # Tiered fallback to ensure robust results but prioritised by date
+            for months in [6, 12, 24, 60, 120]:
+                sql = f"""
+                    SELECT * FROM content 
+                    WHERE content_type = :ct 
+                      AND release_date <= CURRENT_DATE
+                      AND release_date >= CURRENT_DATE - INTERVAL '{months} months'
+                    ORDER BY release_date DESC NULLS LAST, external_rating DESC NULLS LAST
+                    LIMIT :limit
+                """
+                res = await self.db.execute(text(sql), {'ct': content_type, 'limit': limit})
+                rows = [dict(row) for row in res.mappings()]
+                if len(rows) >= 15:
+                    return rows
+            sql = """
+                SELECT * FROM content 
+                WHERE content_type = :ct 
+                  AND release_date <= CURRENT_DATE
+                ORDER BY release_date DESC NULLS LAST, external_rating DESC NULLS LAST
+                LIMIT :limit
+            """
+            res = await self.db.execute(text(sql), {'ct': content_type, 'limit': limit})
+            return [dict(row) for row in res.mappings()]
+
+        latest_db = await _db_latest_query(limit=30)
+
         if content_type == 'movie':
             # Priority: Recent + Popular mixing
             hollywood = [item for item in pop_db if item.get('original_language') == 'en'][:15]
@@ -359,7 +412,7 @@ class ContentService:
                         if len(mixed) >= 12: break
             pop_db = mixed[:24]
         else:
-            pop_db = pop_db[:12]
+            pop_db = pop_db[:24]
 
         genre_rows = []
         for genre in target_genres:
@@ -386,13 +439,14 @@ class ContentService:
 
         resp = {
             "popular": self._map_to_response(pop_db),
+            "latest": self._map_to_response(latest_db),
             "top_rated": self._map_to_response(top_db),
             "anticipated": self._map_to_response(ant_db),
             "genre_rows": genre_rows
         }
         
         if user_id:
-            all_lists = [resp[k] for k in ["popular", "top_rated", "anticipated"]]
+            all_lists = [resp[k] for k in ["popular", "latest", "top_rated", "anticipated"]]
             # Also add items from genre rows correctly
             flat_items = [item for sublist in all_lists for item in (sublist if isinstance(sublist, list) else [])]
             for row in genre_rows:
@@ -1349,3 +1403,357 @@ class ContentService:
             logger.error(f"get_landing_posters failed: {e}")
             # Ultimate fallback — return empty list; client will use mock data
             return []
+
+    async def get_swipe_content(
+        self,
+        user_id: str,
+        content_type: str = "all",
+        genres: Optional[str] = None,
+        year: Optional[int] = None,
+        origin: Optional[str] = None,
+        language: Optional[str] = None,
+        decade: Optional[str] = None,
+        awards: Optional[str] = None,
+        page: int = 1
+    ) -> List[Dict[str, Any]]:
+        import httpx
+        from uuid import UUID
+        
+        # 1. Fetch user's already watched/saved tmdb_ids
+        uid_uuid = UUID(user_id) if isinstance(user_id, str) else user_id
+        
+        status_ids_query = text("""
+            SELECT c.tmdb_id FROM user_content_status ucs
+            JOIN content c ON ucs.content_id = c.id
+            WHERE ucs.user_id = :uid AND (ucs.status != 'none' OR ucs.is_watched = true OR ucs.is_interested = true OR ucs.is_dropped = true)
+        """)
+        status_ids_res = await self.db.execute(status_ids_query, {"uid": uid_uuid})
+        interacted_tmdb_ids = {r["tmdb_id"] for r in status_ids_res.mappings() if r["tmdb_id"] is not None}
+        
+        collection_ids_query = text("""
+            SELECT c.tmdb_id FROM collection_items ci
+            JOIN content c ON ci.content_id = c.id
+            WHERE ci.added_by = :uid
+        """)
+        collection_ids_res = await self.db.execute(collection_ids_query, {"uid": uid_uuid})
+        for r in collection_ids_res.mappings():
+            if r["tmdb_id"] is not None:
+                interacted_tmdb_ids.add(r["tmdb_id"])
+
+        # 3. Determine actual types to query
+        types_to_query = []
+        if content_type == "movie":
+            types_to_query = ["movie"]
+        elif content_type == "series":
+            types_to_query = ["series"]
+        elif content_type == "anime":
+            types_to_query = ["anime"]
+        else:
+            types_to_query = ["movie", "series"]
+
+        raw_results = []
+        
+        country_code_map = {
+            "india": ("IN", "hi|ta|te|ml|kn"),
+            "indian": ("IN", "hi|ta|te|ml|kn"),
+            "usa": ("US", "en"),
+            "united states": ("US", "en"),
+            "uk": ("GB", "en"),
+            "united kingdom": ("GB", "en"),
+            "japan": ("JP", "ja"),
+            "south korea": ("KR", "ko"),
+            "korea": ("KR", "ko"),
+            "france": ("FR", "fr"),
+            "spain": ("ES", "es"),
+            "germany": ("DE", "de"),
+            "canada": ("CA", "en|fr")
+        }
+        
+        lang_map = {
+            "english": "en",
+            "hindi": "hi",
+            "korean": "ko",
+            "japanese": "ja",
+            "french": "fr",
+            "spanish": "es",
+            "german": "de",
+            "tamil": "ta",
+            "telugu": "te",
+            "malayalam": "ml",
+            "kannada": "kn"
+        }
+        
+        award_keyword_map = {
+            "oscars": "370793|353465|360635",
+            "oscar": "370793|353465|360635",
+            "cannes": "366594|347694|250135",
+            "bafta": "320648|360546",
+            "golden globes": "341034|335286|344724",
+            "golden globe": "341034|335286|344724",
+            "emmys": "334043",
+            "emmy": "334043"
+        }
+        
+        # 4. Query TMDB discover API
+        async with httpx.AsyncClient() as client:
+            for ctype in types_to_query:
+                path = "movie" if ctype == "movie" else "tv"
+                is_movie = (ctype == "movie")
+                
+                # Resolve genre ids for this specific content type!
+                genre_map = {
+                    'Action': (28 if is_movie else 10759),
+                    'Adventure': (12 if is_movie else 10759),
+                    'Animation': 16,
+                    'Comedy': 35,
+                    'Crime': 80,
+                    'Documentary': 99,
+                    'Drama': 18,
+                    'Family': 10751,
+                    'Fantasy': (14 if is_movie else 10765),
+                    'History': 36,
+                    'Horror': (27 if is_movie else 9648),
+                    'Music': 10402,
+                    'Mystery': 9648,
+                    'Romance': 10749,
+                    'Science Fiction': (878 if is_movie else 10765),
+                    'Sci-Fi': (878 if is_movie else 10765),
+                    'TV Movie': 10770,
+                    'Thriller': (53 if is_movie else 9648),
+                    'War': (10768 if not is_movie else 10752),
+                    'Western': 37
+                }
+                
+                genre_ids = []
+                if genres:
+                    for g in genres.split(','):
+                        g_trimmed = g.strip()
+                        for name, gid in genre_map.items():
+                            if name.lower() == g_trimmed.lower():
+                                genre_ids.append(str(gid))
+                                break
+                
+                with_genres = ",".join(genre_ids) if genre_ids else None
+                
+                params = {
+                    "api_key": self.tmdb_client.api_key,
+                    "language": "en-US",
+                    "sort_by": "popularity.desc",
+                    "page": page,
+                }
+                
+                if with_genres:
+                    params["with_genres"] = with_genres
+                
+                if ctype == "series":
+                    params["without_genres"] = "10766" # No soaps
+                
+                if year:
+                    if ctype == "movie":
+                        params["primary_release_year"] = year
+                    else:
+                        params["first_air_date_year"] = year
+                
+                # Apply country mapping (origin)
+                if origin:
+                    orig_key = origin.lower().strip()
+                    if orig_key in country_code_map:
+                        ccode, langcode = country_code_map[orig_key]
+                        params["with_origin_country"] = ccode
+                        params["with_original_language"] = langcode
+                        # For TMDB release regions
+                        if orig_key in ["india", "indian"]:
+                            params["region"] = "IN"
+                    elif origin == "Indian":
+                        params["with_original_language"] = "hi|ta|te|ml|kn"
+                        params["region"] = "IN"
+                        params["with_origin_country"] = "IN"
+                
+                # Apply language mapping
+                if language:
+                    lang_lower = language.lower().strip()
+                    if lang_lower in lang_map:
+                        params["with_original_language"] = lang_map[lang_lower]
+                
+                # Apply decade range mapping
+                if decade:
+                    dec_clean = decade.replace("s", "").strip()
+                    if len(dec_clean) == 2:
+                        if dec_clean.startswith(('0', '1', '2')):
+                            dec_clean = "20" + dec_clean
+                        else:
+                            dec_clean = "19" + dec_clean
+                    try:
+                        dec_val = int(dec_clean)
+                        start_year = dec_val
+                        end_year = dec_val + 9
+                        
+                        start_date = f"{start_year}-01-01"
+                        end_date = f"{end_year}-12-31"
+                        
+                        if ctype == "movie":
+                            params["primary_release_date.gte"] = start_date
+                            params["primary_release_date.lte"] = end_date
+                        else:
+                            params["first_air_date.gte"] = start_date
+                            params["first_air_date.lte"] = end_date
+                    except Exception as e:
+                        logger.error(f"Error parsing decade: {decade}, {e}")
+                
+                # Apply awards keyword mapping
+                if awards:
+                    aw_lower = awards.lower().strip()
+                    if aw_lower in award_keyword_map:
+                        params["with_keywords"] = award_keyword_map[aw_lower]
+
+                try:
+                    url = f"{self.tmdb_client.BASE_URL}/discover/{path}"
+                    logger.info(f"SWIPE_TMDB: Querying {url} with params {params}")
+                    resp = await client.get(url, params=params, timeout=15.0)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    results = data.get("results", [])
+                    
+                    normalized = []
+                    for item in results:
+                        if ctype == "movie":
+                            normalized.append(self.tmdb_client._normalize_movie(item))
+                        else:
+                            normalized.append(self.tmdb_client._normalize_series(item))
+                    raw_results.extend(normalized)
+                except Exception as e:
+                    logger.error(f"Swipe TMDB discover failed for {ctype}: {e}")
+
+        # 5. Exclude interacted / watched / collection IDs
+        filtered_results = []
+        for item in raw_results:
+            tmdb_id = item.get("tmdb_id")
+            if tmdb_id in interacted_tmdb_ids:
+                continue
+            
+            # Post-filter for Global origin if needed
+            if origin == "Global":
+                orig_lang = item.get("original_language")
+                if orig_lang in ["hi", "ta", "te", "ml", "kn"]:
+                    continue
+                    
+            filtered_results.append(item)
+
+        # 6. Auto-sync / Upsert to DB and return response
+        if filtered_results:
+            upserted_rows = await self._upsert_tmdb_content(filtered_results, returning=True)
+
+        results_list = [dict(row) for row in upserted_rows]
+        return self._map_to_response(results_list)
+
+    async def get_watch_providers(self, content_id: str, country: str = "IN") -> List[Dict[str, Any]]:
+        """Fetch watch providers for a movie/tv show from TMDB, filtered by country."""
+        country_upper = country.upper()
+        cache_key = CacheKeys.watch_providers(content_id, country_upper)
+        
+        # 1. Check cache first
+        try:
+            cached = await cache.get(cache_key)
+            if cached is not None:
+                return cached
+        except Exception: pass
+
+        # 2. Resolve content
+        content = await self.get_content_by_id(content_id)
+        if not content:
+            return []
+
+        tmdb_id = content.tmdb_id
+        tmdb_type = 'movie' if content.content_type == 'movie' else 'tv'
+
+        # If it's anime and we don't have a tmdb_id, attempt to map it by searching TMDB by title
+        if content.content_type == 'anime' and not tmdb_id:
+            try:
+                # 1. Try search series
+                series_matches = await self.tmdb_client.search_series(content.title)
+                if series_matches:
+                    tmdb_id = int(series_matches[0].get("id") or series_matches[0].get("tmdb_id"))
+                    tmdb_type = "tv"
+                else:
+                    # 2. Try search movies
+                    movie_matches = await self.tmdb_client.search_movies(content.title)
+                    if movie_matches:
+                        tmdb_id = int(movie_matches[0].get("id") or movie_matches[0].get("tmdb_id"))
+                        tmdb_type = "movie"
+                
+                # If we found a match, update the database record so we don't have to search again
+                if tmdb_id:
+                    logger.info(f"Anime mapping: Resolved '{content.title}' (MAL: {content.mal_id}) to TMDB ID {tmdb_id} ({tmdb_type})")
+                    await self.db.execute(
+                        text("UPDATE content SET tmdb_id = :tmdb_id WHERE id = CAST(:id AS UUID)"),
+                        {"tmdb_id": tmdb_id, "id": content.id}
+                    )
+                    await self.db.commit()
+            except Exception as e:
+                logger.error(f"Failed to resolve and save TMDB ID for anime '{content.title}': {e}")
+                await self.db.rollback()
+
+        if not tmdb_id:
+            return []
+
+        # 3. Fetch from TMDB
+        raw_providers = await self.tmdb_client.get_watch_providers(tmdb_id, tmdb_type)
+        
+        country_data = raw_providers.get(country_upper, {}) if raw_providers else {}
+        flatrate = country_data.get("flatrate", [])
+        ads = country_data.get("ads", [])
+        free = country_data.get("free", [])
+        
+        # Combine flatrate, ads, and free for broader coverage (including ad-supported/free streaming)
+        raw_list = flatrate + ads + free
+        
+        # Deduplicate on provider_id
+        seen = set()
+        results = []
+        for p in raw_list:
+            pid = p.get("provider_id")
+            if pid not in seen:
+                seen.add(pid)
+                logo_path = p.get("logo_path")
+                results.append({
+                    "provider_id": pid,
+                    "provider_name": p.get("provider_name"),
+                    "logo_url": f"https://image.tmdb.org/t/p/original{logo_path}" if logo_path else None
+                })
+
+        # 4. Fallback for Originals (Netflix, Amazon Prime, Disney+) if TMDB providers list is empty
+        if not results:
+            raw_details = await self.tmdb_client.get_raw_details(content.tmdb_id, tmdb_type)
+            if raw_details:
+                companies = [c.get("name", "").lower() for c in raw_details.get("production_companies", [])]
+                networks = [n.get("name", "").lower() for n in raw_details.get("networks", [])] if tmdb_type == "tv" else []
+                
+                is_netflix = any("netflix" in c for c in companies) or any("netflix" in n for n in networks)
+                is_amazon = any("amazon" in c for c in companies) or any("amazon" in n for n in networks)
+                is_disney = any("disney" in c or "marvel studios" in c or "lucasfilm" in c for c in companies) or any("disney" in n for n in networks)
+                
+                if is_netflix:
+                    results.append({
+                        "provider_id": 8,
+                        "provider_name": "Netflix",
+                        "logo_url": "https://image.tmdb.org/t/p/original/pbpMk2JmcoNnQwx5JGpXngfoWtp.jpg"
+                    })
+                if is_amazon:
+                    results.append({
+                        "provider_id": 119,
+                        "provider_name": "Amazon Prime Video",
+                        "logo_url": "https://image.tmdb.org/t/p/original/pvske1MyAoymrs5bguRfVqYiM9a.jpg"
+                    })
+                if is_disney:
+                    results.append({
+                        "provider_id": 2336,
+                        "provider_name": "JioHotstar",
+                        "logo_url": "https://image.tmdb.org/t/p/original/kVqjgpcwvDJOhCupjcLzwwtOp52.jpg"
+                    })
+
+        # 5. Cache response
+        try:
+            await cache.set(cache_key, results, ttl=CacheService.TTL_WATCH_PROVIDERS)
+        except Exception: pass
+
+        return results

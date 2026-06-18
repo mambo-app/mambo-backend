@@ -9,7 +9,24 @@ class UserRepository(BaseRepository):
         return await self.fetch_one('''
             SELECT p.*, us.total_watched, us.total_reviews,
                    us.total_posts, us.followers_count, 
-                   us.following_count, us.friends_count
+                   us.following_count, us.friends_count,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN 0
+                           WHEN now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN us.current_streak
+                           ELSE 0
+                       END, 
+                       0
+                   ) AS current_streak,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN false
+                           WHEN now() AT TIME ZONE 'UTC' >= date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '48 hours'
+                            AND now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN true
+                           ELSE false
+                       END, 
+                       false
+                   ) AS is_in_grace_period
             FROM profiles p
             LEFT JOIN user_stats us ON us.user_id = p.id
             WHERE p.id = CAST(:user_id AS UUID) AND p.is_deleted = false
@@ -19,7 +36,24 @@ class UserRepository(BaseRepository):
         return await self.fetch_one('''
             SELECT p.*, us.total_watched, us.total_reviews,
                    us.total_posts, us.followers_count, 
-                   us.following_count, us.friends_count
+                   us.following_count, us.friends_count,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN 0
+                           WHEN now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN us.current_streak
+                           ELSE 0
+                       END, 
+                       0
+                   ) AS current_streak,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN false
+                           WHEN now() AT TIME ZONE 'UTC' >= date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '48 hours'
+                            AND now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN true
+                           ELSE false
+                       END, 
+                       false
+                   ) AS is_in_grace_period
             FROM profiles p
             LEFT JOIN user_stats us ON us.user_id = p.id
             WHERE p.username = :username AND p.is_deleted = false
@@ -117,9 +151,27 @@ class UserRepository(BaseRepository):
                              limit: int, offset: int) -> list[dict]:
         return await self.fetch_many('''
             SELECT p.id, p.username, p.display_name,
-                   p.avatar_url, p.is_verified
+                   p.avatar_url, p.is_verified,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN 0
+                           WHEN now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN us.current_streak
+                           ELSE 0
+                       END, 
+                       0
+                   ) AS current_streak,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN false
+                           WHEN now() AT TIME ZONE 'UTC' >= date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '48 hours'
+                            AND now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN true
+                           ELSE false
+                       END, 
+                       false
+                   ) AS is_in_grace_period
             FROM follows f
             JOIN profiles p ON p.id = f.follower_id
+            LEFT JOIN user_stats us ON us.user_id = p.id
             WHERE f.following_id = CAST(:user_id AS UUID)
             AND p.is_deleted = false
             ORDER BY f.created_at DESC
@@ -130,9 +182,27 @@ class UserRepository(BaseRepository):
                              limit: int, offset: int) -> list[dict]:
         return await self.fetch_many('''
             SELECT p.id, p.username, p.display_name,
-                   p.avatar_url, p.is_verified
+                   p.avatar_url, p.is_verified,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN 0
+                           WHEN now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN us.current_streak
+                           ELSE 0
+                       END, 
+                       0
+                   ) AS current_streak,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN false
+                           WHEN now() AT TIME ZONE 'UTC' >= date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '48 hours'
+                            AND now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN true
+                           ELSE false
+                       END, 
+                       false
+                   ) AS is_in_grace_period
             FROM follows f
             JOIN profiles p ON p.id = f.following_id
+            LEFT JOIN user_stats us ON us.user_id = p.id
             WHERE f.follower_id = CAST(:user_id AS UUID)
             AND p.is_deleted = false
             ORDER BY f.created_at DESC

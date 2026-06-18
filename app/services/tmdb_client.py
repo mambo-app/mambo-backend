@@ -415,7 +415,7 @@ class TMDBClient:
                 today = date.today().isoformat()
                 all_results = []
                 # BookMyShow style deeper fetch for roadmap reliability
-                for p in range(page, page + 5):
+                for p in range(page, page + 2):
                     resp = await client.get(
                         f"{self.BASE_URL}/discover/movie",
                         params={
@@ -538,6 +538,48 @@ class TMDBClient:
             ],
             "status": item.get("status") # Returning, Ended, etc.
         }
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
+    async def get_now_playing_movies(self, page: int = 1) -> List[Dict[str, Any]]:
+        """Fetch movies currently in theaters globally."""
+        if not self.api_key: return []
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(
+                    f"{self.BASE_URL}/movie/now_playing",
+                    params={
+                        "api_key": self.api_key,
+                        "language": "en-US",
+                        "page": page,
+                    },
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                return [self._normalize_movie(m) for m in resp.json().get("results", [])]
+            except Exception as e:
+                logger.error(f"Error fetching now playing movies: {e}")
+                return []
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
+    async def get_on_the_air_series(self, page: int = 1) -> List[Dict[str, Any]]:
+        """Fetch TV shows currently on the air (airing recently or soon)."""
+        if not self.api_key: return []
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(
+                    f"{self.BASE_URL}/tv/on_the_air",
+                    params={
+                        "api_key": self.api_key,
+                        "language": "en-US",
+                        "page": page,
+                    },
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                return [self._normalize_series(s) for s in resp.json().get("results", [])]
+            except Exception as e:
+                logger.error(f"Error fetching on the air series: {e}")
+                return []
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
     async def get_upcoming_series(self, page: int = 1) -> List[Dict[str, Any]]:
@@ -785,3 +827,39 @@ class TMDBClient:
             "thumbnail_url": f"{self.IMAGE_BASE}{still}" if still else None,
             "vote_average": e.get("vote_average")
         }
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
+    async def get_watch_providers(self, tmdb_id: int, content_type: str) -> Dict[str, Any]:
+        """Fetch watch providers (streaming platforms) for a movie or TV show."""
+        if not self.api_key: return {}
+        path = "movie" if content_type == "movie" else "tv"
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(
+                    f"{self.BASE_URL}/{path}/{tmdb_id}/watch/providers",
+                    params={"api_key": self.api_key},
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                return resp.json().get("results", {})
+            except Exception as e:
+                logger.error(f"Error fetching watch providers for {content_type} {tmdb_id}: {e}")
+                return {}
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
+    async def get_raw_details(self, tmdb_id: int, content_type: str) -> Dict[str, Any]:
+        """Fetch raw movie or TV details from TMDB."""
+        if not self.api_key: return {}
+        path = "movie" if content_type == "movie" else "tv"
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.get(
+                    f"{self.BASE_URL}/{path}/{tmdb_id}",
+                    params={"api_key": self.api_key},
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                logger.error(f"Error fetching raw details for {content_type} {tmdb_id}: {e}")
+                return {}

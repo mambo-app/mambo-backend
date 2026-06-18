@@ -105,6 +105,8 @@ class ActionService:
                 if req.rating is None:
                     raise HTTPException(status_code=400, detail="Rating value required for 'rate' action")
                 await self._handle_rate(user_id, content_id, req.rating)
+            elif req.action == ActionType.unrate:
+                await self._handle_unrate(user_id, content_id)
             elif req.action == ActionType.notify:
                 await self.db.execute(text('''
                     INSERT INTO calendar_alerts (user_id, content_id)
@@ -571,6 +573,35 @@ class ActionService:
         u_svc = UserService(self.db)
         await u_svc.invalidate_profile_cache(str(user_id))
 
+    async def _handle_unrate(self, user_id: UUID, content_id: UUID):
+        # 1. Clear rating from user_content_status
+        await self.db.execute(text('''
+            UPDATE user_content_status
+            SET rating = NULL, updated_at = now()
+            WHERE user_id = :uid AND content_id = :cid
+        '''), {'uid': user_id, 'cid': content_id})
+        
+        # 2. Clear rating from watch history
+        await self.db.execute(text('''
+            UPDATE watch_history 
+            SET rating = NULL 
+            WHERE user_id = :uid AND content_id = :cid
+        '''), {'uid': user_id, 'cid': content_id})
+        
+        # Remove rating-only entries
+        await self.db.execute(text('''
+            DELETE FROM watch_history
+            WHERE user_id = :uid AND content_id = :cid AND watch_type = 'rating_only'
+        '''), {'uid': user_id, 'cid': content_id})
+        
+        # 3. Remove rating activity from activity_log
+        await self._remove_activity(user_id, 'rated', content_id=content_id)
+        
+        # 4. Invalidate cache
+        from app.services.user_service import UserService
+        u_svc = UserService(self.db)
+        await u_svc.invalidate_profile_cache(str(user_id))
+
     async def _sync_to_collection(self, user_id: UUID, content_id: UUID, collection_name: str):
         # 1. Find or create default collection
         stmt_find = text("SELECT id FROM collections WHERE user_id = :uid AND name = :name")
@@ -769,9 +800,9 @@ class ActionService:
             '''), {'badges': json.dumps(new_badges), 'uid': user_id})
 
     async def _update_streak(self, user_id: UUID):
-        """Updates the user's daily watching streak."""
+        """Updates the user's daily watching streak with a 12-hour grace period."""
         from uuid import UUID
-        from datetime import datetime, date, timedelta
+        from datetime import datetime, timezone, date, timedelta
         
         # 1. Fetch current streak info
         res = await self.db.execute(text('''
@@ -792,14 +823,29 @@ class ActionService:
         max_s = stats['max_streak'] or 0
         last = stats['last_streak_at']
         
-        today = date.today()
+        now_dt = datetime.now(timezone.utc)
+        today = now_dt.date()
+        
         if last:
-            last_date = last.date()
-            if last_date == today:
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            last_utc = last.astimezone(timezone.utc)
+            last_date = last_utc.date()
+            
+            if today == last_date:
                 return # Already updated today
-            elif last_date == today - timedelta(days=1):
-                # Streak continued!
+            elif today == last_date + timedelta(days=1):
+                # Streak continued next day!
                 curr += 1
+            elif today == last_date + timedelta(days=2):
+                # Day after tomorrow: check 12-hour grace period (before noon UTC)
+                deadline = datetime(now_dt.year, now_dt.month, now_dt.day, 12, 0, 0, tzinfo=timezone.utc)
+                if now_dt <= deadline:
+                    # Saved within grace period!
+                    curr += 1
+                else:
+                    # Streak broken
+                    curr = 1
             else:
                 # Streak broken
                 curr = 1
@@ -820,6 +866,7 @@ class ActionService:
 
         # 3. Check for badges
         await self._check_badges(user_id)
+
     async def _recalculate_series_progression(self, user_id: UUID, content_id: UUID):
         """
         Check if all seasons are completed and update main series status.

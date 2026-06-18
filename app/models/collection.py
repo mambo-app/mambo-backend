@@ -27,7 +27,7 @@ class CollectionReorderRequest(BaseModel):
     collection_ids: List[UUID]
 
 class CollectionItemRequest(BaseModel):
-    content_id: UUID
+    content_id: str
 
 class CollectionUpdateRequest(BaseModel):
     name: Optional[str] = None

@@ -51,7 +51,24 @@ class UserService:
     async def get_by_username(self, username: str, viewer_id: str | None) -> dict:
         result = await self.db.execute(text('''
             SELECT p.*,
-                   us.followers_count, us.following_count, us.friends_count, us.total_posts
+                   us.followers_count, us.following_count, us.friends_count, us.total_posts,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN 0
+                           WHEN now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN us.current_streak
+                           ELSE 0
+                       END, 
+                       0
+                   ) AS current_streak,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN false
+                           WHEN now() AT TIME ZONE 'UTC' >= date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '48 hours'
+                            AND now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN true
+                           ELSE false
+                       END, 
+                       false
+                   ) AS is_in_grace_period
             FROM profiles p
             LEFT JOIN user_stats us ON us.user_id = p.id
             WHERE p.username = :username
@@ -82,23 +99,27 @@ class UserService:
 
         # Get favorite actors
         actors_res = await self.db.execute(text('''
-            SELECT p.name 
-            FROM user_actor_preferences uap
-            JOIN persons p ON p.id = CAST(uap.person_id AS TEXT)
-            WHERE uap.user_id = CAST(:id AS UUID)
-            ORDER BY uap.preference_order ASC
+            SELECT name 
+            FROM user_person_favorites
+            WHERE user_id = CAST(:id AS UUID) AND is_actor = true
+            ORDER BY favorite_order ASC NULLS LAST, created_at DESC
         '''), {'id': owner_id})
         profile_dict['favorite_actors'] = [row[0] for row in actors_res]
 
         # Get favorite directors
         directors_res = await self.db.execute(text('''
-            SELECT p.name 
-            FROM user_director_preferences udp
-            JOIN persons p ON p.id = CAST(udp.person_id AS TEXT)
-            WHERE udp.user_id = CAST(:id AS UUID)
-            ORDER BY udp.preference_order ASC
+            SELECT name 
+            FROM user_person_favorites
+            WHERE user_id = CAST(:id AS UUID) AND is_actor = false
+            ORDER BY favorite_order ASC NULLS LAST, created_at DESC
         '''), {'id': owner_id})
         profile_dict['favorite_directors'] = [row[0] for row in directors_res]
+
+        # Get favorite genres
+        genres_res = await self.db.execute(text('''
+            SELECT genre_name FROM user_favorite_genres WHERE user_id = CAST(:id AS UUID)
+        '''), {'id': owner_id})
+        profile_dict['favorite_genres'] = [row[0] for row in genres_res]
         
         # Privacy Enforcement
         if viewer_id != owner_id:
@@ -238,7 +259,24 @@ class UserService:
 
         result = await self.db.execute(text('''
             SELECT p.*, 
-                   us.followers_count, us.following_count, us.friends_count, us.total_posts
+                   us.followers_count, us.following_count, us.friends_count, us.total_posts,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN 0
+                           WHEN now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN us.current_streak
+                           ELSE 0
+                       END, 
+                       0
+                   ) AS current_streak,
+                   COALESCE(
+                       CASE 
+                           WHEN us.last_streak_at IS NULL THEN false
+                           WHEN now() AT TIME ZONE 'UTC' >= date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '48 hours'
+                            AND now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN true
+                           ELSE false
+                       END, 
+                       false
+                   ) AS is_in_grace_period
             FROM profiles p
             LEFT JOIN user_stats us ON us.user_id = p.id
             WHERE p.id = CAST(:id AS UUID)
@@ -267,23 +305,27 @@ class UserService:
 
         # Get favorite actors
         actors_res = await self.db.execute(text('''
-            SELECT p.name 
-            FROM user_actor_preferences uap
-            JOIN persons p ON p.id = CAST(uap.person_id AS TEXT)
-            WHERE uap.user_id = CAST(:id AS UUID)
-            ORDER BY uap.preference_order ASC
+            SELECT name 
+            FROM user_person_favorites
+            WHERE user_id = CAST(:id AS UUID) AND is_actor = true
+            ORDER BY favorite_order ASC NULLS LAST, created_at DESC
         '''), {'id': user_id})
         profile_dict['favorite_actors'] = [row[0] for row in actors_res]
 
         # Get favorite directors
         directors_res = await self.db.execute(text('''
-            SELECT p.name 
-            FROM user_director_preferences udp
-            JOIN persons p ON p.id = CAST(udp.person_id AS TEXT)
-            WHERE udp.user_id = CAST(:id AS UUID)
-            ORDER BY udp.preference_order ASC
+            SELECT name 
+            FROM user_person_favorites
+            WHERE user_id = CAST(:id AS UUID) AND is_actor = false
+            ORDER BY favorite_order ASC NULLS LAST, created_at DESC
         '''), {'id': user_id})
         profile_dict['favorite_directors'] = [row[0] for row in directors_res]
+
+        # Get favorite genres
+        genres_res = await self.db.execute(text('''
+            SELECT genre_name FROM user_favorite_genres WHERE user_id = CAST(:id AS UUID)
+        '''), {'id': user_id})
+        profile_dict['favorite_genres'] = [row[0] for row in genres_res]
 
         # Cache response
         await cache.set(cache_key, profile_dict, ttl=CacheService.TTL_USER_PROFILE)
@@ -540,7 +582,24 @@ class UserService:
                 user_id,
                 total_watched, total_reviews, total_posts,
                 followers_count, following_count, friends_count,
-                current_streak, max_streak, last_streak_at
+                COALESCE(
+                    CASE 
+                        WHEN last_streak_at IS NULL THEN 0
+                        WHEN now() AT TIME ZONE 'UTC' < date_trunc('day', last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN current_streak
+                        ELSE 0
+                    END, 
+                    0
+                ) AS current_streak,
+                max_streak, last_streak_at,
+                COALESCE(
+                    CASE 
+                        WHEN last_streak_at IS NULL THEN false
+                        WHEN now() AT TIME ZONE 'UTC' >= date_trunc('day', last_streak_at AT TIME ZONE 'UTC') + interval '48 hours'
+                         AND now() AT TIME ZONE 'UTC' < date_trunc('day', last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN true
+                        ELSE false
+                    END, 
+                    false
+                ) AS is_in_grace_period
             FROM user_stats
             WHERE user_id = CAST(:user_id AS UUID)
         '''), {'user_id': user_id})
@@ -556,7 +615,8 @@ class UserService:
                 "friends_count": 0,
                 "current_streak": 0,
                 "max_streak": 0,
-                "last_streak_at": None
+                "last_streak_at": None,
+                "is_in_grace_period": False
             }
         return dict(stats)
 

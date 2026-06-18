@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
 
     # 1. Critical schema init at startup (Production only)
     if settings.app_env != 'development':
-        from app.core.init_db import init_db
+        from app.core.init_db import init_db, init_db_data_healing
         async with AsyncSessionLocal() as db:
             logger.info("Initializing critical schemas at startup")
             await init_db(db)

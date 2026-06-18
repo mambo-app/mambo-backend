@@ -13,6 +13,7 @@ class ActionType(str, Enum):
     unsave = 'unsave'
     recommend = 'recommend'
     rate = 'rate'
+    unrate = 'unrate'
     review = 'review'
     notify = 'notify'
     unnotify = 'unnotify'

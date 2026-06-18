@@ -40,7 +40,8 @@ class NotificationService:
         res = await self.db.execute(text('''
             SELECT n.*, 
                    p.display_name as actor_name, 
-                   p.avatar_url as actor_profile_url
+                   p.avatar_url as actor_profile_url,
+                   p.username as actor_username
             FROM notifications n
             LEFT JOIN profiles p ON p.id = n.actor_id
             WHERE n.user_id = CAST(:user_id AS UUID) AND n.is_deleted = false

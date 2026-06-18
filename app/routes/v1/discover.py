@@ -55,6 +55,33 @@ async def get_trending_creators(
     items = await service.get_trending_creators(limit, viewer_id=user_id)
     return ok({"items": items})
 
+@router.get('/swipe', response_model=dict[str, Any])
+async def get_swipe_content(
+    content_type: str = Query("all", description="movie, series, anime, all"),
+    genres: Optional[str] = Query(None, description="Comma-separated genre names"),
+    year: Optional[int] = Query(None, description="Release year"),
+    origin: Optional[str] = Query("All", description="Indian, Global, All"),
+    language: Optional[str] = Query(None, description="Original language filter"),
+    decade: Optional[str] = Query(None, description="Decade filter (e.g. 1980s)"),
+    awards: Optional[str] = Query(None, description="Award filter (e.g. Oscars)"),
+    page: int = Query(1, description="Page number"),
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    service = ContentService(db)
+    items = await service.get_swipe_content(
+        user_id=user_id,
+        content_type=content_type,
+        genres=genres,
+        year=year,
+        origin=origin,
+        language=language,
+        decade=decade,
+        awards=awards,
+        page=page,
+    )
+    return ok({"items": items})
+
 @router.get('/{mode}', response_model=dict[str, Any])
 async def get_discover(
     mode: str, 
@@ -88,3 +115,5 @@ async def get_person_profile(
     profile = await service.get_person_profile(person_id)
     logger.info(f"DEBUG_PROFILE_RESPONSE: found={bool(profile)}")
     return ok(profile)
+
+# Replaced by version declared above get_discover

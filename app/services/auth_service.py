@@ -292,9 +292,6 @@ class AuthService:
             
             # 2. Check if user exists in Supabase
             try:
-                # We use the admin client to check by email
-                from app.core.supabase import supabase_admin
-                user_res = supabase_admin.auth.admin.list_users() # Not ideal but get_user_by_email is sometimes flaky in old SDKs
                 # Efficiently check by filtering in our Neon profiles first!
                 result = await self.db.execute(text("SELECT id FROM profiles WHERE email = :e"), {'e': email})
                 profile = result.mappings().first()

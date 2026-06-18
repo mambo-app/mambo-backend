@@ -17,11 +17,13 @@ async def get_activity_feed(
     db: AsyncSession = Depends(get_db),
     current_user_id: str = Depends(get_current_user_id)
 ):
-    # Base query
+    # Base query joining content to get title and poster
     query_str = '''
-        SELECT a.*, p.username, p.display_name, p.avatar_url
+        SELECT a.*, p.username, p.display_name, p.avatar_url,
+               c.title as content_title, c.poster_url as content_poster
         FROM activity_log a
         JOIN profiles p ON p.id = a.user_id
+        LEFT JOIN content c ON c.id = a.content_id
         WHERE a.visibility = 'public'
     '''
     params = {'limit': limit, 'offset': offset}
@@ -33,7 +35,17 @@ async def get_activity_feed(
     query_str += " ORDER BY a.created_at DESC LIMIT :limit OFFSET :offset"
     
     res = await db.execute(text(query_str), params)
-    items = [dict(row) for row in res.mappings()]
+    
+    items = []
+    for row in res.mappings():
+        item_dict = dict(row)
+        # Create metadata map with content info for the frontend
+        item_dict['metadata'] = {
+            'content_title': item_dict.get('content_title') or 'Content',
+            'poster_url': item_dict.get('content_poster'),
+            **(item_dict.get('metadata') or {})
+        }
+        items.append(item_dict)
     
     return ok({"items": items})
 

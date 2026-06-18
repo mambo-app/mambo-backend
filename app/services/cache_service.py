@@ -38,6 +38,11 @@ except (ImportError, AttributeError):
     _is_async = False
 
 
+import time
+import copy
+
+_local_cache = {}
+
 class CacheKeys:
     @staticmethod
     def content(content_id: str) -> str:
@@ -63,6 +68,10 @@ class CacheKeys:
     def discover(mode: str, identifier: str, date_str: str) -> str:
         return f'discover:{mode}:{identifier}:{date_str}'
 
+    @staticmethod
+    def watch_providers(content_id: str, country: str) -> str:
+        return f'watch_providers:{content_id}:{country}'
+
 class CacheService:
     TTL_CONTENT      = 3600
     TTL_USER_PROFILE = 300
@@ -70,10 +79,18 @@ class CacheService:
     TTL_TRENDING     = 86400
     TTL_DISCOVER     = 86400
     TTL_SEARCH       = 600
+    TTL_WATCH_PROVIDERS = 86400
 
     @staticmethod
     async def get(key: str):
         if settings.app_env == 'development':
+            cached = _local_cache.get(key)
+            if cached:
+                val, expiry = cached
+                if expiry is None or expiry > time.time():
+                    return val
+                else:
+                    _local_cache.pop(key, None)
             return None
         try:
             if _is_async:
@@ -92,6 +109,11 @@ class CacheService:
     @staticmethod
     async def set(key: str, value, ttl: int):
         if settings.app_env == 'development':
+            try:
+                copied_value = copy.deepcopy(value)
+            except Exception:
+                copied_value = value
+            _local_cache[key] = (copied_value, time.time() + ttl)
             return
         try:
             serialized = json.dumps(value, default=str)
@@ -106,6 +128,7 @@ class CacheService:
     @staticmethod
     async def delete(key: str):
         if settings.app_env == 'development':
+            _local_cache.pop(key, None)
             return
         try:
             if _is_async:

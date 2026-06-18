@@ -102,3 +102,15 @@ async def get_season_details(
     service = ContentService(db)
     data = await service.get_season_details(content_id, season_number)
     return ok(data)
+
+@router.get('/{content_id}/watch-providers')
+async def get_watch_providers(
+    content_id: str,
+    country: str = "IN",
+    db: AsyncSession = Depends(get_db)
+):
+    from app.services.content_service import ContentService
+    from app.models.common import ok
+    service = ContentService(db)
+    providers = await service.get_watch_providers(content_id, country)
+    return ok(providers)
