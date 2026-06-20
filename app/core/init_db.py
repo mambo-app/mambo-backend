@@ -412,6 +412,7 @@ async def init_db_data_healing(db: AsyncSession):
         await db.execute(text("UPDATE collections SET collection_type = 'watchlist' WHERE name = 'Watchlist' AND collection_type NOT IN ('watchlist')"))
         await db.execute(text("UPDATE collections SET collection_type = 'dropped' WHERE name = 'Dropped' AND collection_type NOT IN ('dropped')"))
         await db.execute(text("UPDATE collections SET collection_type = 'watched' WHERE name = 'Watched' AND collection_type NOT IN ('watched')"))
+        await db.execute(text("UPDATE collections SET collection_type = 'custom' WHERE collection_type = 'user'"))
         await db.execute(text('''
             INSERT INTO collection_items (collection_id, content_id, added_by)
             SELECT c.id, ucs.content_id, ucs.user_id

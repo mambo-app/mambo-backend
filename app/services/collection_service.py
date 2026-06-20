@@ -60,8 +60,8 @@ class CollectionService:
                                 visibility: str = 'public') -> Dict:
         is_public = visibility == 'public'
         stmt = text('''
-            INSERT INTO collections (user_id, name, description, is_public, visibility, is_default, is_deletable)
-            VALUES (:user_id, :name, :description, :is_public, :visibility, false, true)
+            INSERT INTO collections (user_id, name, description, is_public, visibility, is_default, is_deletable, collection_type)
+            VALUES (:user_id, :name, :description, :is_public, :visibility, false, true, 'custom')
             RETURNING *
         ''')
         res = await self.db.execute(stmt, {

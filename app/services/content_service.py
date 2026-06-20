@@ -1493,153 +1493,218 @@ class ContentService:
             "emmys": "334043",
             "emmy": "334043"
         }
+
+        # Query 3 pages concurrently from TMDB to ensure a larger pool of results
+        pages_to_fetch = [(page - 1) * 3 + 1, (page - 1) * 3 + 2, (page - 1) * 3 + 3]
         
-        # 4. Query TMDB discover API
-        async with httpx.AsyncClient() as client:
-            for ctype in types_to_query:
-                path = "movie" if ctype == "movie" else "tv"
-                is_movie = (ctype == "movie")
-                
-                # Resolve genre ids for this specific content type!
-                genre_map = {
-                    'Action': (28 if is_movie else 10759),
-                    'Adventure': (12 if is_movie else 10759),
-                    'Animation': 16,
-                    'Comedy': 35,
-                    'Crime': 80,
-                    'Documentary': 99,
-                    'Drama': 18,
-                    'Family': 10751,
-                    'Fantasy': (14 if is_movie else 10765),
-                    'History': 36,
-                    'Horror': (27 if is_movie else 9648),
-                    'Music': 10402,
-                    'Mystery': 9648,
-                    'Romance': 10749,
-                    'Science Fiction': (878 if is_movie else 10765),
-                    'Sci-Fi': (878 if is_movie else 10765),
-                    'TV Movie': 10770,
-                    'Thriller': (53 if is_movie else 9648),
-                    'War': (10768 if not is_movie else 10752),
-                    'Western': 37
-                }
-                
-                genre_ids = []
-                if genres:
-                    for g in genres.split(','):
-                        g_trimmed = g.strip()
-                        for name, gid in genre_map.items():
-                            if name.lower() == g_trimmed.lower():
-                                genre_ids.append(str(gid))
-                                break
-                
-                with_genres = ",".join(genre_ids) if genre_ids else None
-                
-                params = {
-                    "api_key": self.tmdb_client.api_key,
-                    "language": "en-US",
-                    "sort_by": "popularity.desc",
-                    "page": page,
-                }
-                
-                if with_genres:
-                    params["with_genres"] = with_genres
-                
-                if ctype == "series":
-                    params["without_genres"] = "10766" # No soaps
-                
-                if year:
-                    if ctype == "movie":
-                        params["primary_release_year"] = year
-                    else:
-                        params["first_air_date_year"] = year
-                
-                # Apply country mapping (origin)
-                if origin:
-                    orig_key = origin.lower().strip()
-                    if orig_key in country_code_map:
-                        ccode, langcode = country_code_map[orig_key]
-                        params["with_origin_country"] = ccode
-                        params["with_original_language"] = langcode
-                        # For TMDB release regions
-                        if orig_key in ["india", "indian"]:
-                            params["region"] = "IN"
-                    elif origin == "Indian":
-                        params["with_original_language"] = "hi|ta|te|ml|kn"
+        query_configs = []
+        for ctype in types_to_query:
+            if ctype == "anime":
+                # Anime can be movies or TV series, query both on TMDB
+                for path in ["movie", "tv"]:
+                    for p_num in pages_to_fetch:
+                        query_configs.append({
+                            "ctype": "anime",
+                            "path": path,
+                            "is_movie": (path == "movie"),
+                            "page_num": p_num
+                        })
+            elif ctype == "movie":
+                for p_num in pages_to_fetch:
+                    query_configs.append({
+                        "ctype": "movie",
+                        "path": "movie",
+                        "is_movie": True,
+                        "page_num": p_num
+                    })
+            elif ctype == "series":
+                for p_num in pages_to_fetch:
+                    query_configs.append({
+                        "ctype": "series",
+                        "path": "tv",
+                        "is_movie": False,
+                        "page_num": p_num
+                    })
+
+        async def fetch_single_query(config: dict, client: httpx.AsyncClient) -> List[Dict[str, Any]]:
+            is_movie = config["is_movie"]
+            ctype = config["ctype"]
+            path = config["path"]
+            page_num = config["page_num"]
+            
+            # Resolve genre ids for this specific content type!
+            genre_map = {
+                'Action': (28 if is_movie else 10759),
+                'Adventure': (12 if is_movie else 10759),
+                'Animation': 16,
+                'Comedy': 35,
+                'Crime': 80,
+                'Documentary': 99,
+                'Drama': 18,
+                'Family': 10751,
+                'Fantasy': (14 if is_movie else 10765),
+                'History': 36,
+                'Horror': (27 if is_movie else 9648),
+                'Music': 10402,
+                'Mystery': 9648,
+                'Romance': 10749,
+                'Science Fiction': (878 if is_movie else 10765),
+                'Sci-Fi': (878 if is_movie else 10765),
+                'TV Movie': 10770,
+                'Thriller': (53 if is_movie else 9648),
+                'War': (10768 if not is_movie else 10752),
+                'Western': 37
+            }
+            
+            genre_ids = []
+            if genres:
+                for g in genres.split(','):
+                    g_trimmed = g.strip()
+                    for name, gid in genre_map.items():
+                        if name.lower() == g_trimmed.lower():
+                            genre_ids.append(str(gid))
+                            break
+            
+            # For Anime mode: strictly ensure Animation genre (16) is included!
+            if ctype == "anime":
+                if "16" not in genre_ids:
+                    genre_ids.append("16")
+            
+            with_genres = ",".join(genre_ids) if genre_ids else None
+            
+            params = {
+                "api_key": self.tmdb_client.api_key,
+                "language": "en-US",
+                "sort_by": "popularity.desc",
+                "page": page_num,
+            }
+            
+            if with_genres:
+                params["with_genres"] = with_genres
+            
+            if ctype == "series":
+                params["without_genres"] = "10766" # No soaps
+            
+            if year:
+                if is_movie:
+                    params["primary_release_year"] = year
+                else:
+                    params["first_air_date_year"] = year
+            
+            # Apply country mapping (origin)
+            if origin:
+                orig_key = origin.lower().strip()
+                if orig_key in country_code_map:
+                    ccode, langcode = country_code_map[orig_key]
+                    params["with_origin_country"] = ccode
+                    params["with_original_language"] = langcode
+                    # For TMDB release regions
+                    if orig_key in ["india", "indian"]:
                         params["region"] = "IN"
-                        params["with_origin_country"] = "IN"
-                
-                # Apply language mapping
-                if language:
-                    lang_lower = language.lower().strip()
-                    if lang_lower in lang_map:
-                        params["with_original_language"] = lang_map[lang_lower]
-                
-                # Apply decade range mapping
-                if decade:
-                    dec_clean = decade.replace("s", "").strip()
-                    if len(dec_clean) == 2:
-                        if dec_clean.startswith(('0', '1', '2')):
-                            dec_clean = "20" + dec_clean
-                        else:
-                            dec_clean = "19" + dec_clean
-                    try:
-                        dec_val = int(dec_clean)
-                        start_year = dec_val
-                        end_year = dec_val + 9
-                        
-                        start_date = f"{start_year}-01-01"
-                        end_date = f"{end_year}-12-31"
-                        
-                        if ctype == "movie":
-                            params["primary_release_date.gte"] = start_date
-                            params["primary_release_date.lte"] = end_date
-                        else:
-                            params["first_air_date.gte"] = start_date
-                            params["first_air_date.lte"] = end_date
-                    except Exception as e:
-                        logger.error(f"Error parsing decade: {decade}, {e}")
-                
-                # Apply awards keyword mapping
-                if awards:
-                    aw_lower = awards.lower().strip()
-                    if aw_lower in award_keyword_map:
-                        params["with_keywords"] = award_keyword_map[aw_lower]
-
+                elif origin == "Indian":
+                    params["with_original_language"] = "hi|ta|te|ml|kn"
+                    params["region"] = "IN"
+                    params["with_origin_country"] = "IN"
+            
+            # Apply language mapping (strict Japanese override for Anime)
+            if language and ctype != "anime":
+                lang_lower = language.lower().strip()
+                if lang_lower in lang_map:
+                    params["with_original_language"] = lang_map[lang_lower]
+            elif ctype == "anime":
+                params["with_original_language"] = "ja"
+            
+            # Apply decade range mapping
+            if decade:
+                dec_clean = decade.replace("s", "").strip()
+                if len(dec_clean) == 2:
+                    if dec_clean.startswith(('0', '1', '2')):
+                        dec_clean = "20" + dec_clean
+                    else:
+                        dec_clean = "19" + dec_clean
                 try:
-                    url = f"{self.tmdb_client.BASE_URL}/discover/{path}"
-                    logger.info(f"SWIPE_TMDB: Querying {url} with params {params}")
-                    resp = await client.get(url, params=params, timeout=15.0)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    results = data.get("results", [])
+                    dec_val = int(dec_clean)
+                    start_year = dec_val
+                    end_year = dec_val + 9
                     
-                    normalized = []
-                    for item in results:
-                        if ctype == "movie":
-                            normalized.append(self.tmdb_client._normalize_movie(item))
-                        else:
-                            normalized.append(self.tmdb_client._normalize_series(item))
-                    raw_results.extend(normalized)
+                    start_date = f"{start_year}-01-01"
+                    end_date = f"{end_year}-12-31"
+                    
+                    if is_movie:
+                        params["primary_release_date.gte"] = start_date
+                        params["primary_release_date.lte"] = end_date
+                    else:
+                        params["first_air_date.gte"] = start_date
+                        params["first_air_date.lte"] = end_date
                 except Exception as e:
-                    logger.error(f"Swipe TMDB discover failed for {ctype}: {e}")
+                    logger.error(f"Error parsing decade: {decade}, {e}")
+            
+            # Apply awards keyword mapping
+            if awards:
+                aw_lower = awards.lower().strip()
+                if aw_lower in award_keyword_map:
+                    params["with_keywords"] = award_keyword_map[aw_lower]
+            
+            try:
+                url = f"{self.tmdb_client.BASE_URL}/discover/{path}"
+                logger.info(f"SWIPE_TMDB: Querying {url} with params {params}")
+                resp = await client.get(url, params=params, timeout=15.0)
+                resp.raise_for_status()
+                data = resp.json()
+                results = data.get("results", [])
+                
+                normalized = []
+                for item in results:
+                    if is_movie:
+                        normalized_item = self.tmdb_client._normalize_movie(item)
+                    else:
+                        normalized_item = self.tmdb_client._normalize_series(item)
+                    
+                    # Force content_type to "anime" if we queried for anime!
+                    if ctype == "anime":
+                        normalized_item["content_type"] = "anime"
+                        
+                    normalized.append(normalized_item)
+                return normalized
+            except Exception as e:
+                logger.error(f"Swipe TMDB discover failed for {ctype} (page {page_num}): {e}")
+                return []
 
-        # 5. Exclude interacted / watched / collection IDs
+        # 4. Query TMDB discover API concurrently
+        async with httpx.AsyncClient() as client:
+            tasks = [fetch_single_query(config, client) for config in query_configs]
+            task_results = await asyncio.gather(*tasks)
+            for res_list in task_results:
+                raw_results.extend(res_list)
+
+        # 5. Exclude interacted / watched / collection IDs and filter anime out of movie/series modes
         filtered_results = []
+        seen_tmdb_ids = set() # Avoid duplicates since we query both movie and tv for anime
+        
         for item in raw_results:
             tmdb_id = item.get("tmdb_id")
-            if tmdb_id in interacted_tmdb_ids:
+            if not tmdb_id:
                 continue
+            if tmdb_id in interacted_tmdb_ids or tmdb_id in seen_tmdb_ids:
+                continue
+            
+            # Exclude Japanese Animation (Anime) from movie and series modes!
+            if content_type in ["movie", "series", "all"]:
+                # If original language is Japanese and genre is Animation, it is Anime, so filter it out
+                if item.get("original_language") == "ja" and "Animation" in item.get("genres", []):
+                    continue
             
             # Post-filter for Global origin if needed
             if origin == "Global":
                 orig_lang = item.get("original_language")
                 if orig_lang in ["hi", "ta", "te", "ml", "kn"]:
                     continue
-                    
+            
+            seen_tmdb_ids.add(tmdb_id)
             filtered_results.append(item)
 
         # 6. Auto-sync / Upsert to DB and return response
+        upserted_rows = []
         if filtered_results:
             upserted_rows = await self._upsert_tmdb_content(filtered_results, returning=True)
 
