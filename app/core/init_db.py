@@ -84,6 +84,20 @@ async def init_db(db: AsyncSession):
     await add_col("content", "last_synced_at",         "TIMESTAMPTZ DEFAULT now()")
     await add_col("content", "created_at",             "TIMESTAMPTZ DEFAULT now()")
 
+    try:
+        await db.execute(text(
+            "ALTER TABLE public.content ADD CONSTRAINT content_tmdb_id_key UNIQUE (tmdb_id)"
+        ))
+    except Exception:
+        await db.rollback()
+
+    try:
+        await db.execute(text(
+            "ALTER TABLE public.content ADD CONSTRAINT content_mal_id_key UNIQUE (mal_id)"
+        ))
+    except Exception:
+        await db.rollback()
+
     await add_col("reviews", "rating",            "FLOAT")
     await add_col("reviews", "star_rating",       "INTEGER")
     await add_col("reviews", "text_review",       "TEXT")
