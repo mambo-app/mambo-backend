@@ -271,6 +271,20 @@ class SocialService:
         from app.models.action import ActionType
         action_svc = ActionService(self.db)
 
+        # Fetch content type
+        content_res = await self.db.execute(text(
+            "SELECT content_type FROM content WHERE id = :id"
+        ), {"id": content_id})
+        content_row = content_res.mappings().one_or_none()
+        content_type = content_row.get('content_type') if content_row else None
+
+        # Fetch watch status
+        status_res = await self.db.execute(text(
+            "SELECT is_watched FROM user_content_status WHERE user_id = :uid AND content_id = :cid"
+        ), {"uid": user_id, "cid": content_id})
+        status_row = status_res.mappings().one_or_none() or {}
+        is_watched = status_row.get('is_watched') or False
+
         session_res = await self.db.execute(text('''
             SELECT id FROM watch_history 
             WHERE user_id = :uid AND content_id = :cid 
@@ -279,15 +293,33 @@ class SocialService:
         latest_session = session_res.mappings().one_or_none()
         
         watch_history_id = None
-        if latest_session:
+        if latest_session and (is_watched or content_type != 'movie'):
             watch_history_id = latest_session['id']
             # Update the rating for this session to match the review
             await self.db.execute(text('''
                 UPDATE watch_history SET rating = :r WHERE id = :wid
             '''), {'r': star_rating, 'wid': watch_history_id})
+            
+            # If it is a movie and not yet watched (e.g. they only had a rating_only watch history entry),
+            # mark it as watched/completed and update stats/collections.
+            if content_type == 'movie' and not is_watched:
+                await self.db.execute(text('''
+                    UPDATE user_content_status 
+                    SET is_watched = true, is_dropped = false, status = 'completed', watch_count = COALESCE(watch_count, 0) + 1, last_watched_at = now(), updated_at = now()
+                    WHERE user_id = :uid AND content_id = :cid
+                '''), {'uid': user_id, 'cid': content_id})
+                await action_svc._sync_to_collection(user_id, content_id, 'Watched')
+                await self.db.execute(text('''
+                    UPDATE user_stats SET total_watched = COALESCE(total_watched, 0) + 1, updated_at = now() WHERE user_id = :uid
+                '''), {'uid': user_id})
+                await action_svc._update_streak(user_id)
         else:
-            # Create a new session if none found
+            # Create a new session if none found OR if it's a movie and not yet watched
             watch_history_id = await action_svc._handle_watch(user_id, content_id, ActionType.watch)
+            # Update the rating for this session to match the review
+            await self.db.execute(text('''
+                UPDATE watch_history SET rating = :r WHERE id = :wid
+            '''), {'r': star_rating, 'wid': watch_history_id})
 
         # 3. Create review record
         review = await self.repo.create_review(

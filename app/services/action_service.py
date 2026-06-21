@@ -513,43 +513,103 @@ class ActionService:
         await self._update_streak(user_id)
 
     async def _handle_rate(self, user_id: UUID, content_id: UUID, rating: float):
+        # Fetch content type
+        content_res = await self.db.execute(text(
+            "SELECT content_type FROM content WHERE id = :id"
+        ), {"id": content_id})
+        content_row = content_res.mappings().one_or_none()
+        content_type = content_row.get('content_type') if content_row else None
+
+        # Fetch current watch status
+        status_res = await self.db.execute(text(
+            "SELECT is_watched, watch_count FROM user_content_status WHERE user_id = :uid AND content_id = :cid"
+        ), {"uid": user_id, "cid": content_id})
+        status_row = status_res.mappings().one_or_none() or {}
+        was_watched = status_row.get('is_watched') or False
+        old_count = status_row.get('watch_count') or 0
+
         # 1. Update status flag and rating (Latest Status)
-        stmt = text('''
-            INSERT INTO user_content_status (user_id, content_id, rating, updated_at)
-            VALUES (:user_id, :content_id, :rating, now())
-            ON CONFLICT (user_id, content_id) DO UPDATE SET
-                rating = :rating,
-                updated_at = now()
-        ''')
-        await self.db.execute(stmt, {'user_id': user_id, 'content_id': content_id, 'rating': rating})
+        if content_type == 'movie':
+            stmt = text('''
+                INSERT INTO user_content_status (user_id, content_id, rating, is_watched, is_dropped, status, watch_count, first_watched_at, last_watched_at, updated_at)
+                VALUES (:user_id, :content_id, :rating, true, false, 'completed', 1, now(), now(), now())
+                ON CONFLICT (user_id, content_id) DO UPDATE SET
+                    rating = :rating,
+                    is_watched = true,
+                    is_dropped = false,
+                    status = 'completed',
+                    watch_count = CASE WHEN user_content_status.is_watched = false THEN 1 ELSE user_content_status.watch_count END,
+                    updated_at = now()
+            ''')
+            await self.db.execute(stmt, {'user_id': user_id, 'content_id': content_id, 'rating': rating})
+            
+            # Sync to Watched collection
+            await self._sync_to_collection(user_id, content_id, 'Watched')
+            
+            # Increment total_watched stat if this is first watch
+            if not was_watched:
+                await self.db.execute(text('''
+                    INSERT INTO user_stats (user_id, total_watched)
+                    VALUES (:user_id, 1)
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        total_watched = user_stats.total_watched + 1,
+                        updated_at = now()
+                '''), {'user_id': user_id})
+                
+                # Update streak for movie watch
+                await self._update_streak(user_id)
+        else:
+            stmt = text('''
+                INSERT INTO user_content_status (user_id, content_id, rating, updated_at)
+                VALUES (:user_id, :content_id, :rating, now())
+                ON CONFLICT (user_id, content_id) DO UPDATE SET
+                    rating = :rating,
+                    updated_at = now()
+            ''')
+            await self.db.execute(stmt, {'user_id': user_id, 'content_id': content_id, 'rating': rating})
         
         # 2. Update the MOST RECENT watch history entry with this rating
-        # If no entry exists (user rated without watching), CREATE ONE with type 'rating_only'
-        res = await self.db.execute(text('''
-            UPDATE watch_history 
-            SET rating = :rating 
-            WHERE id = (
-                SELECT id FROM watch_history 
-                WHERE user_id = :uid AND content_id = :cid 
-                ORDER BY watched_at DESC LIMIT 1
-            )
-            RETURNING id
-        '''), {'uid': user_id, 'cid': content_id, 'rating': rating})
-        
-        updated_row = res.mappings().one_or_none()
+        # If no entry exists (user rated without watching), CREATE ONE
+        updated_row = None
+        if not (content_type == 'movie' and not was_watched):
+            res = await self.db.execute(text('''
+                UPDATE watch_history 
+                SET rating = :rating 
+                WHERE id = (
+                    SELECT id FROM watch_history 
+                    WHERE user_id = :uid AND content_id = :cid 
+                    ORDER BY watched_at DESC LIMIT 1
+                )
+                RETURNING id
+            '''), {'uid': user_id, 'cid': content_id, 'rating': rating})
+            updated_row = res.mappings().one_or_none()
         
         if not updated_row:
-            # Create a "rating only" history entry so it shows in the Rating History screen
-            import uuid
-            await self.db.execute(text('''
-                INSERT INTO watch_history (id, user_id, content_id, rating, watch_type, watched_at)
-                VALUES (:id, :user_id, :content_id, :rating, 'rating_only', now())
-            '''), {
-                'id': uuid.uuid4(),
-                'user_id': user_id,
-                'content_id': content_id,
-                'rating': rating
-            })
+            if content_type == 'movie' and not was_watched:
+                watch_type = 'first_watch' if old_count == 0 else 'rewatch'
+                import uuid
+                await self.db.execute(text('''
+                    INSERT INTO watch_history (id, user_id, content_id, rating, watch_type, watched_at)
+                    VALUES (:id, :user_id, :content_id, :rating, :watch_type, now())
+                '''), {
+                    'id': uuid.uuid4(),
+                    'user_id': user_id,
+                    'content_id': content_id,
+                    'rating': rating,
+                    'watch_type': watch_type
+                })
+            else:
+                # Create a "rating only" history entry so it shows in the Rating History screen
+                import uuid
+                await self.db.execute(text('''
+                    INSERT INTO watch_history (id, user_id, content_id, rating, watch_type, watched_at)
+                    VALUES (:id, :user_id, :content_id, :rating, 'rating_only', now())
+                '''), {
+                    'id': uuid.uuid4(),
+                    'user_id': user_id,
+                    'content_id': content_id,
+                    'rating': rating
+                })
 
         # 3. Log activity
         # Check if this content was already watched (to decide if rewatch badge)
