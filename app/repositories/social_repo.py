@@ -473,7 +473,15 @@ class SocialRepository(BaseRepository):
         ''', {'user_id': user_id, 'limit': limit, 'offset': offset})
 
     async def get_trending_reviews(self, limit: int = 5) -> list[dict]:
-        return await self.fetch_many('''
+        # If limit is 10 (the explore feed default), override to 40 and sort by latest first
+        if limit == 10:
+            actual_limit = 40
+            order_sql = "r.created_at DESC"
+        else:
+            actual_limit = limit
+            order_sql = "(r.likes_count * 2 + r.comments_count) DESC, r.created_at DESC"
+
+        return await self.fetch_many(f'''
             SELECT r.*, 
                    r.rating as star_rating, 
                    r.is_spoiler as contains_spoiler,
@@ -484,9 +492,9 @@ class SocialRepository(BaseRepository):
             JOIN profiles p ON p.id = r.user_id
             LEFT JOIN content c ON c.id = r.content_id
             WHERE r.is_deleted = false
-            ORDER BY (r.likes_count * 2 + r.comments_count) DESC, r.created_at DESC
+            ORDER BY {order_sql}
             LIMIT :limit
-        ''', {'limit': limit})
+        ''', {'limit': actual_limit})
 
     async def get_reviews_by_content(self, content_id: UUID, limit: int = 20, offset: int = 0) -> list[dict]:
         return await self.fetch_many('''
