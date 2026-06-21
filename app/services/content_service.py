@@ -616,6 +616,17 @@ class ContentService:
             return {}
             
         logger.info(f"DEBUG_PROFILE_RESOLVED: person_id={person_id} -> tmdb_id={tmdb_id}")
+        
+        # Check cache
+        cache_key = CacheKeys.person_profile(str(tmdb_id))
+        try:
+            cached = await cache.get(cache_key)
+            if cached:
+                logger.info(f"Cache hit for person profile: {tmdb_id}")
+                return cached
+        except Exception as e:
+            logger.error(f"Cache lookup failed for person profile: {e}")
+
         # Fetch from TMDB (always fresh for detail screen)
         details = await self.tmdb_client.get_person_details(tmdb_id)
         if not details: 
@@ -634,6 +645,12 @@ class ContentService:
         details['top_credits'] = credits[:10]
         details['filmography'] = credits
         
+        # Cache response
+        try:
+            await cache.set(cache_key, details, ttl=CacheService.TTL_PERSON_PROFILE)
+        except Exception as e:
+            logger.error(f"Failed to cache person profile {tmdb_id}: {e}")
+            
         return details
 
     async def get_hot_reviews(self, limit: int = 10) -> List[Dict[str, Any]]:

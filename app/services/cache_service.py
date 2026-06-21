@@ -72,6 +72,10 @@ class CacheKeys:
     def watch_providers(content_id: str, country: str) -> str:
         return f'watch_providers:{content_id}:{country}'
 
+    @staticmethod
+    def person_profile(person_id: str) -> str:
+        return f'person:{person_id}:profile'
+
 class CacheService:
     TTL_CONTENT      = 3600
     TTL_USER_PROFILE = 300
@@ -80,6 +84,7 @@ class CacheService:
     TTL_DISCOVER     = 86400
     TTL_SEARCH       = 600
     TTL_WATCH_PROVIDERS = 86400
+    TTL_PERSON_PROFILE = 86400 * 7 # 7 days
 
     @staticmethod
     async def get(key: str):
