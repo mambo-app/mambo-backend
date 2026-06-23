@@ -92,7 +92,7 @@ async def get_recently_watched(
             JOIN content c ON c.id = a.content_id
             JOIN user_content_status ucs ON ucs.content_id = c.id AND ucs.user_id = a.user_id
             WHERE a.user_id = :uid 
-              AND a.activity_type IN ('watched', 'rewatched')
+              AND a.activity_type IN ('watched', 'rewatched', 'rated', 'reviewed', 'updated_review')
               AND ucs.status = 'completed'
         )
         SELECT * FROM RankedActivities 

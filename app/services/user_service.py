@@ -424,7 +424,42 @@ class UserService:
             ORDER BY al.created_at DESC
             LIMIT 30
         '''), {'username': username, 'is_owner': is_owner})
-        return [dict(row) for row in result.mappings()]
+        activities = [dict(row) for row in result.mappings()]
+        
+        extra_activities = []
+        watched_content_ids = {
+            act['content_id'] 
+            for act in activities 
+            if act['activity_type'] in ('watched', 'rewatched') and act['content_id']
+        }
+        
+        for act in activities:
+            if act['activity_type'] in ('rated', 'reviewed', 'updated_review') and act['user_content_status'] == 'completed':
+                cid = act['content_id']
+                if cid and cid not in watched_content_ids:
+                    is_rewatch = False
+                    if act['details']:
+                        try:
+                            import json
+                            det = act['details']
+                            if isinstance(det, str):
+                                det = json.loads(det)
+                            if isinstance(det, dict):
+                                is_rewatch = det.get('is_rewatch', False) or (det.get('watch_count', 1) > 1)
+                        except Exception:
+                            pass
+                    
+                    watched_act = act.copy()
+                    watched_act['activity_type'] = 'rewatched' if is_rewatch else 'watched'
+                    extra_activities.append(watched_act)
+                    watched_content_ids.add(cid)
+                    
+        if extra_activities:
+            activities.extend(extra_activities)
+            activities.sort(key=lambda x: x['watched_at'], reverse=True)
+            activities = activities[:30]
+            
+        return activities
 
     async def get_library(self, username: str, viewer_id: str | None = None, status: str | None = None, limit: int = 500, offset: int = 0) -> list[dict]:
         """Returns all actively-tracked content (watching + on_hold) from user_content_status.
