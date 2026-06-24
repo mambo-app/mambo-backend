@@ -24,10 +24,12 @@ async def get_activity_feed(
     # Filter by high-value activity types only
     query_str = '''
         SELECT a.*, p.username, p.display_name, p.avatar_url,
-               c.title as content_title, c.poster_url as content_poster
+               c.title as content_title, c.poster_url as content_poster,
+               r.is_spoiler as contains_spoiler
         FROM activity_log a
         JOIN profiles p ON p.id = a.user_id
-        LEFT JOIN content c ON c.id = a.content_id
+        LEFT JOIN reviews r ON r.id = a.review_id
+        LEFT JOIN content c ON c.id = COALESCE(a.content_id, r.content_id)
         WHERE a.visibility = 'public'
           AND a.activity_type IN ('watched', 'rewatched', 'reviewed', 'post')
     '''
@@ -47,6 +49,7 @@ async def get_activity_feed(
         item_dict['metadata'] = {
             'content_title': item_dict.get('content_title') or 'Content',
             'poster_url': item_dict.get('content_poster'),
+            'contains_spoiler': bool(item_dict.get('contains_spoiler')),
             **(item_dict.get('metadata') or {})
         }
         raw_items.append(item_dict)

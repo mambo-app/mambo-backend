@@ -169,10 +169,15 @@ class ActionService:
                     'completed': 'watched',
                     'dropped': 'dropped',
                     'plan_to_watch': 'interested',
-                    'watching': 'watched'
+                    'watching': 'watching',
+                    'on_hold': 'on_hold'
                 }
                 act_type = activity_map.get(req.status, 'watched')
                 await self._log_activity(user_id, act_type, content_id=content_id, details={'status': req.status})
+
+                # 4. Auto-remove from watchlist if status is watching or completed
+                if req.status in ('watching', 'completed'):
+                    await self._auto_remove_from_watchlist(user_id, content_id)
             
             elif req.action == ActionType.watch_episode:
                 if req.season_number is None or req.episode_number is None:
@@ -512,6 +517,9 @@ class ActionService:
         # 6. Update Streak
         await self._update_streak(user_id)
 
+        # 7. Auto-remove from watchlist
+        await self._auto_remove_from_watchlist(user_id, content_id)
+
     async def _handle_rate(self, user_id: UUID, content_id: UUID, rating: float):
         # Fetch content type
         content_res = await self.db.execute(text(
@@ -632,6 +640,14 @@ class ActionService:
         from app.services.user_service import UserService
         u_svc = UserService(self.db)
         await u_svc.invalidate_profile_cache(str(user_id))
+
+        # 5. Auto-remove from watchlist if status is watching or completed
+        status_res = await self.db.execute(text(
+            "SELECT status FROM user_content_status WHERE user_id = :uid AND content_id = :cid"
+        ), {'uid': user_id, 'cid': content_id})
+        new_status = status_res.scalar()
+        if new_status in ('watching', 'completed'):
+            await self._auto_remove_from_watchlist(user_id, content_id)
 
     async def _handle_unrate(self, user_id: UUID, content_id: UUID):
         # 1. Clear rating from user_content_status
@@ -1023,5 +1039,18 @@ class ActionService:
                         SET status = 'watching', updated_at = now()
                         WHERE user_id = :uid AND content_id = :cid AND status != 'dropped'
                     '''), {'uid': user_id, 'cid': content_id})
+
+                # Check current status and auto-remove from watchlist if watching or completed
+                status_res = await self.db.execute(text(
+                    "SELECT status FROM user_content_status WHERE user_id = :uid AND content_id = :cid"
+                ), {'uid': user_id, 'cid': content_id})
+                new_status = status_res.scalar()
+                if new_status in ('watching', 'completed'):
+                    await self._auto_remove_from_watchlist(user_id, content_id)
         except Exception as e:
             logger.error(f"Error recalculating progression for {content_id}: {e}")
+
+    async def _auto_remove_from_watchlist(self, user_id: UUID, content_id: UUID):
+        """Automatically remove content from user's Watchlist (plan_to_watch)."""
+        await self._update_status_flag(user_id, content_id, 'is_interested', False)
+        await self._remove_from_collection(user_id, content_id, 'Watchlist')

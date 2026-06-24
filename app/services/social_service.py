@@ -151,7 +151,29 @@ class SocialService:
 
     async def toggle_review_like(self, user_id: UUID, review_id: UUID) -> bool:
         """Toggle a like on a review."""
-        return await self.repo.toggle_review_like(user_id, review_id)
+        liked = await self.repo.toggle_review_like(user_id, review_id)
+        if liked:
+            try:
+                # Query review author and content title
+                res = await self.db.execute(text('''
+                    SELECT r.user_id as author_id, c.title as content_title
+                    FROM reviews r
+                    LEFT JOIN content c ON c.id = r.content_id
+                    WHERE r.id = :rid
+                '''), {'rid': review_id})
+                row = res.mappings().one_or_none()
+                if row and row['author_id'] != user_id:
+                    await self.notif_service.create_notification({
+                        'user_id': row['author_id'],
+                        'type': 'review_liked',
+                        'actor_id': user_id,
+                        'message': f"liked your review of {row['content_title'] or 'Content'}",
+                        'related_id': review_id
+                    })
+            except Exception as e:
+                import logging
+                logging.getLogger('mambo.social').error(f"Failed to create like notification: {e}")
+        return liked
 
     async def toggle_post_upvote(self, user_id: UUID, post_id: UUID) -> bool:
         """Toggle an upvote on a post."""
