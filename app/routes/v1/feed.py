@@ -31,7 +31,7 @@ async def get_activity_feed(
         LEFT JOIN reviews r ON r.id = a.review_id
         LEFT JOIN content c ON c.id = COALESCE(a.content_id, r.content_id)
         WHERE a.visibility = 'public'
-          AND a.activity_type IN ('watched', 'rewatched', 'reviewed', 'post')
+          AND a.activity_type IN ('watched', 'rewatched', 'reviewed', 'post', 'rated')
     '''
     params = {'limit': db_limit}
     
@@ -50,7 +50,7 @@ async def get_activity_feed(
             'content_title': item_dict.get('content_title') or 'Content',
             'poster_url': item_dict.get('content_poster'),
             'contains_spoiler': bool(item_dict.get('contains_spoiler')),
-            **(item_dict.get('metadata') or {})
+            **(item_dict.get('details') or {})
         }
         raw_items.append(item_dict)
 
@@ -64,7 +64,7 @@ async def get_activity_feed(
             best_activities[key] = item
         else:
             existing = best_activities[key]
-            priority = {'reviewed': 4, 'post': 3, 'rewatched': 2, 'watched': 1}
+            priority = {'reviewed': 4, 'post': 3, 'rated': 2.5, 'rewatched': 2, 'watched': 1}
             p_existing = priority.get(existing['activity_type'], 0)
             p_new = priority.get(item['activity_type'], 0)
             if p_new > p_existing:
