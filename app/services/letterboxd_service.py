@@ -40,15 +40,30 @@ class LetterboxdService:
         try:
             # cloudscraper calls must run in an executor since it is synchronous
             def scrape():
-                scraper = cloudscraper.create_scraper(
-                    browser={"browser": "chrome", "platform": "windows", "mobile": False}
-                )
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                }
                 url = f"https://letterboxd.com/{username}/"
-                resp = scraper.get(url, timeout=10)
-                if resp.status_code == 404:
-                    return None
-                resp.raise_for_status()
-                return resp.text
+                try:
+                    scraper = cloudscraper.create_scraper(
+                        browser={"browser": "chrome", "platform": "windows", "mobile": False}
+                    )
+                    resp = scraper.get(url, headers=headers, timeout=12)
+                    if resp.status_code == 200:
+                        return resp.text
+                except Exception:
+                    pass
+
+                import requests
+                try:
+                    resp = requests.get(url, headers=headers, timeout=12)
+                    if resp.status_code == 200:
+                        return resp.text
+                except Exception:
+                    pass
+                return None
 
             html = await loop.run_in_executor(None, scrape)
             if not html:

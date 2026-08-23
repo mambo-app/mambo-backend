@@ -530,6 +530,17 @@ class ActionService:
         old_count = current_status.get('watch_count', 0)
         was_watched = current_status.get('is_watched', False)
 
+        # If action is plain WATCH and item was already watched, check for recent session in last 12 hours
+        if action == ActionType.watch and was_watched:
+            recent_wh = await self.db.execute(text("""
+                SELECT id FROM watch_history 
+                WHERE user_id = :uid AND content_id = :cid AND watched_at >= (now() - interval '12 hours')
+                ORDER BY watched_at DESC LIMIT 1
+            """), {"uid": user_id, "cid": content_id})
+            existing_id = recent_wh.scalar()
+            if existing_id:
+                return existing_id
+
         init_count = 2 if action == ActionType.rewatch and old_count == 0 else 1
 
         # 2. Update status
@@ -541,16 +552,22 @@ class ActionService:
                 is_dropped = false,
                 status = 'completed',
                 watch_count = CASE 
+                                WHEN :is_rewatch THEN user_content_status.watch_count + 1
                                 WHEN user_content_status.is_watched = false THEN :init_count 
-                                ELSE user_content_status.watch_count + 1 
+                                ELSE user_content_status.watch_count 
                               END,
                 last_watched_at = now(),
                 updated_at = now()
         ''')
-        await self.db.execute(stmt_status, {'user_id': user_id, 'content_id': content_id, 'init_count': init_count})
+        await self.db.execute(stmt_status, {
+            'user_id': user_id, 
+            'content_id': content_id, 
+            'init_count': init_count,
+            'is_rewatch': (action == ActionType.rewatch)
+        })
 
-        # 3. Add to history (ALWAYS INSERT NEW)
-        watch_type = 'first_watch' if old_count == 0 else 'rewatch'
+        # 3. Add to history
+        watch_type = 'rewatch' if action == ActionType.rewatch else ('first_watch' if old_count == 0 else 'first_watch')
         stmt_history = text('''
             INSERT INTO watch_history (id, user_id, content_id, watch_type, watched_at)
             VALUES (:id, :user_id, :content_id, :watch_type, now())

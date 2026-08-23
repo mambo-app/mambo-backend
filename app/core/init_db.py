@@ -68,6 +68,25 @@ async def init_db(db: AsyncSession):
                 'Tulsa King', 'Stranger Things Season 5', 'Invincible Season 3', 'The Witcher Season 4', 'Euphoria Season 3'
             ) OR tmdb_id IS NULL;
         """))
+        # Merge duplicate watch_history rows created on the same day for a single watch session
+        await db.execute(text("""
+            WITH duplicates AS (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY user_id, content_id, watched_at::date 
+                    ORDER BY CASE WHEN watch_type = 'first_watch' THEN 1 ELSE 2 END, watched_at ASC
+                ) as rn
+                FROM watch_history
+            )
+            DELETE FROM watch_history WHERE id IN (SELECT id FROM duplicates WHERE rn > 1);
+        """))
+        # Recalculate watch_count in user_content_status
+        await db.execute(text("""
+            UPDATE user_content_status ucs
+            SET watch_count = COALESCE((
+                SELECT COUNT(*) FROM watch_history wh WHERE wh.user_id = ucs.user_id AND wh.content_id = ucs.content_id
+            ), 1)
+            WHERE ucs.is_watched = true;
+        """))
         await db.commit()
     except Exception as e:
         logger.warning(f"Migration error: {e}")
