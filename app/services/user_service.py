@@ -452,37 +452,6 @@ class UserService:
         activities = [dict(row) for row in result.mappings()]
         activities.sort(key=lambda x: str(x.get('watched_at') or ''), reverse=True)
         
-        extra_activities = []
-        watched_content_ids = {
-            act['content_id'] 
-            for act in activities 
-            if act['activity_type'] in ('watched', 'rewatched') and act['content_id']
-        }
-        
-        for act in activities:
-            if act['activity_type'] in ('rated', 'reviewed', 'updated_review') and act['user_content_status'] == 'completed':
-                cid = act['content_id']
-                if cid and cid not in watched_content_ids:
-                    is_rewatch = False
-                    if act['details']:
-                        try:
-                            import json
-                            det = act['details']
-                            if isinstance(det, str):
-                                det = json.loads(det)
-                            if isinstance(det, dict):
-                                is_rewatch = det.get('is_rewatch', False) or (det.get('watch_count', 1) > 1)
-                        except Exception:
-                            pass
-                    
-                    watched_act = act.copy()
-                    watched_act['activity_type'] = 'rewatched' if is_rewatch else 'watched'
-                    extra_activities.append(watched_act)
-                    watched_content_ids.add(cid)
-                    
-        if extra_activities:
-            activities.extend(extra_activities)
-
         # Fallback: if we have fewer than 5 unique watched/rewatched activities, query user_content_status
         unique_watched_count = len({act['content_id'] for act in activities if act['activity_type'] in ('watched', 'rewatched') and act['content_id']})
         if unique_watched_count < 5:

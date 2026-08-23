@@ -68,17 +68,16 @@ async def init_db(db: AsyncSession):
                 'Tulsa King', 'Stranger Things Season 5', 'Invincible Season 3', 'The Witcher Season 4', 'Euphoria Season 3'
             ) OR tmdb_id IS NULL;
         """))
-        # Merge duplicate watch_history rows generated from review attachments where watch_type != 'rewatch'
+        # Merge duplicate watch_history rows generated from review attachments
         await db.execute(text("""
             WITH duplicates AS (
                 SELECT id, ROW_NUMBER() OVER (
                     PARTITION BY user_id, content_id 
                     ORDER BY 
-                        CASE WHEN watch_type = 'first_watch' THEN 1 WHEN watch_type = 'review_only' THEN 2 ELSE 3 END,
+                        CASE WHEN review_id IS NOT NULL THEN 1 WHEN watch_type = 'first_watch' THEN 2 ELSE 3 END,
                         watched_at ASC
                 ) as rn
                 FROM watch_history
-                WHERE watch_type != 'rewatch'
             )
             DELETE FROM watch_history WHERE id IN (SELECT id FROM duplicates WHERE rn > 1);
         """))
