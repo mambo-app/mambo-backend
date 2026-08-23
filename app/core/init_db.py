@@ -108,6 +108,8 @@ async def init_db(db: AsyncSession):
     await add_col("user_stats", "total_posts",     "INTEGER DEFAULT 0")
     await add_col("user_stats", "updated_at",      "TIMESTAMPTZ DEFAULT now()")
 
+    await add_col("collection_items", "imported_from", "VARCHAR(50)")
+
     await add_col("content", "content_type",           "TEXT NOT NULL DEFAULT 'movie'")
     await add_col("content", "tmdb_id",                "INTEGER")
     await add_col("content", "mal_id",                 "INTEGER")

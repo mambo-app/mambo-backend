@@ -914,6 +914,20 @@ class LetterboxdService:
                     if sync_progress.get(user_id, {}).get("cancelled"):
                         raise Exception("Import cancelled by user")
 
+                headers_chrome = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                    "Sec-Ch-Ua-Mobile": "?0",
+                    "Sec-Ch-Ua-Platform": '"Windows"',
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
+                    "Upgrade-Insecure-Requests": "1"
+                }
+
                 scraper = cloudscraper.create_scraper(
                     browser={"browser": "chrome", "platform": "windows", "mobile": False}
                 )
@@ -922,21 +936,52 @@ class LetterboxdService:
                 check_cancelled()
                 sync_progress[user_id]["current_item"] = "Fetching watched films list..."
                 films = []
-                for p in range(1, 10): # limit to first 9 pages (~650 items) for runtime safety on server
+                for p in range(1, 20): # fetch up to 20 pages (~1440 items) for complete history
                     check_cancelled()
-                    soup = BeautifulSoup(scraper.get(f"https://letterboxd.com/{username}/films/page/{p}/").text, "html.parser")
-                    items = []
-                    for div in soup.find_all(attrs={"data-item-slug": True}):
-                        slug = div.get("data-item-slug", "").strip()
-                        li = div.find_parent("li")
-                        rating_span = li.select_one("span.rating") if li else None
-                        rating = self.parse_stars(rating_span.get_text()) if rating_span else None
-                        items.append({"slug": slug, "rating": rating})
-                    if not items:
+                    try:
+                        resp = scraper.get(f"https://letterboxd.com/{username}/films/page/{p}/", headers=headers_chrome, timeout=12)
+                        if resp.status_code != 200:
+                            break
+                        soup = BeautifulSoup(resp.text, "html.parser")
+                        items = []
+                        for div in soup.find_all(attrs={"data-item-slug": True}):
+                            slug = div.get("data-item-slug", "").strip()
+                            li = div.find_parent("li")
+                            rating_span = li.select_one("span.rating") if li else None
+                            rating = self.parse_stars(rating_span.get_text()) if rating_span else None
+                            items.append({"slug": slug, "rating": rating})
+                        if not items:
+                            break
+                        films.extend(items)
+                        if not soup.select_one("a.next"):
+                            break
+                    except Exception:
                         break
-                    films.extend(items)
-                    if not soup.select_one("a.next"):
-                        break
+
+                # RSS Fallback if HTML scraping returned 0 items
+                if not films:
+                    try:
+                        import requests
+                        import xml.etree.ElementTree as ET
+                        rss_url = f"https://letterboxd.com/{username}/rss/"
+                        rss_resp = requests.get(rss_url, headers=headers_chrome, timeout=12)
+                        if rss_resp.status_code == 200 and "<rss" in rss_resp.text:
+                            root = ET.fromstring(rss_resp.text)
+                            channel = root.find("channel")
+                            if channel:
+                                for item in channel.findall("item"):
+                                    film_title = item.findtext("{https://letterboxd.com}filmTitle")
+                                    tmdb_id = item.findtext("{https://themoviedb.org}movieId")
+                                    rating_str = item.findtext("{https://letterboxd.com}memberRating")
+                                    link = item.findtext("link") or ""
+                                    slug = link.rstrip("/").split("/")[-1] if "film/" in link else None
+                                    if not slug and film_title:
+                                        slug = film_title.lower().replace(" ", "-")
+                                    if slug:
+                                        rating_val = float(rating_str) if rating_str else None
+                                        films.append({"slug": slug, "rating": rating_val, "tmdb_id": tmdb_id, "title": film_title})
+                    except Exception as rss_err:
+                        logger.warning(f"RSS fallback error: {rss_err}")
 
                 # Fetch Watchlist (all pages)
                 check_cancelled()
@@ -945,14 +990,20 @@ class LetterboxdService:
                 p = 1
                 while True:
                     check_cancelled()
-                    soup = BeautifulSoup(scraper.get(f"https://letterboxd.com/{username}/watchlist/page/{p}/").text, "html.parser")
-                    slugs = list(dict.fromkeys(re.findall(r'data-item-slug="([^"]+)"', str(soup))))
-                    if not slugs:
+                    try:
+                        resp = scraper.get(f"https://letterboxd.com/{username}/watchlist/page/{p}/", headers=headers_chrome, timeout=12)
+                        if resp.status_code != 200:
+                            break
+                        soup = BeautifulSoup(resp.text, "html.parser")
+                        slugs = list(dict.fromkeys(re.findall(r'data-item-slug="([^"]+)"', str(soup))))
+                        if not slugs:
+                            break
+                        watchlist.extend(slugs)
+                        if not soup.select_one("a.next"):
+                            break
+                        p += 1
+                    except Exception:
                         break
-                    watchlist.extend(slugs)
-                    if not soup.select_one("a.next"):
-                        break
-                    p += 1
 
                 # Fetch Liked films (all pages)
                 check_cancelled()
