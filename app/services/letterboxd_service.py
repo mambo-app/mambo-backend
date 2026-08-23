@@ -63,11 +63,38 @@ class LetterboxdService:
                         return resp.text
                 except Exception:
                     pass
+
+                # Fallback: Open RSS Feed (Never blocked by Cloudflare datacenter IP rules)
+                try:
+                    rss_url = f"https://letterboxd.com/{username}/rss/"
+                    resp = requests.get(rss_url, headers=headers, timeout=12)
+                    if resp.status_code == 200 and "<rss" in resp.text:
+                        return {"is_rss": True, "xml": resp.text}
+                except Exception:
+                    pass
+
                 return None
 
             html = await loop.run_in_executor(None, scrape)
             if not html:
                 return {"success": False, "message": "Profile not found on Letterboxd."}
+
+            if isinstance(html, dict) and html.get("is_rss"):
+                xml_text = html.get("xml", "")
+                display_name = username
+                if "<title>Letterboxd - " in xml_text:
+                    try:
+                        display_name = xml_text.split("<title>Letterboxd - ")[1].split("</title>")[0].strip()
+                    except Exception:
+                        pass
+                return {
+                    "success": True,
+                    "username": username,
+                    "display_name": display_name,
+                    "avatar_url": None,
+                    "bio": None,
+                    "stats": {},
+                }
 
             soup = BeautifulSoup(html, "html.parser")
             name_el = soup.find("h1", class_="person-display-name")
