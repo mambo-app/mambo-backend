@@ -2353,6 +2353,8 @@ class ContentService:
                             matching_rev = next((r for r in all_reviews if str(r['id']) == str(wh['review_id'])), None)
                         if not matching_rev:
                             matching_rev = next((r for r in all_reviews if str(r.get('watch_history_id')) == wid), None)
+                        if not matching_rev and len(history_rows) == 1 and all_reviews:
+                            matching_rev = all_reviews[0]
 
                         if matching_rev:
                             processed_rev_ids.add(str(matching_rev['id']))
@@ -2370,7 +2372,7 @@ class ContentService:
                             'watch_type': wh.get('watch_type', 'first_watch')
                         })
 
-                    # 2. Add any orphan reviews that don't have a watch_history row in combined_entries
+                    # 2. Add any remaining orphan reviews that don't match any watch_history entry
                     for rev in all_reviews:
                         rid = str(rev['id'])
                         if rid not in processed_rev_ids:
@@ -2380,7 +2382,7 @@ class ContentService:
                                 'watched_at': rev['created_at'],
                                 'rating': float(rev_r) if rev_r is not None else resp.user_rating,
                                 'review': rev['text_review'],
-                                'watch_type': 'rewatch' if len(combined_entries) > 0 else 'first_watch'
+                                'watch_type': 'first_watch' if len(combined_entries) == 0 else 'rewatch'
                             })
 
                     # 3. Sort combined entries chronologically ASC
