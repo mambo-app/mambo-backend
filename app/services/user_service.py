@@ -438,6 +438,7 @@ class UserService:
                     )
                 LEFT JOIN user_content_status ucs ON ucs.content_id = c.id AND ucs.user_id = al.user_id
                 WHERE p.username = :username
+                AND c.id IS NOT NULL
                 AND (al.visibility = 'public' OR :is_owner = true)
                 AND (al.review_id IS NULL OR (r.id IS NOT NULL AND r.is_deleted = false))
                 AND (ucs.status IS NULL OR ucs.status NOT IN ('dropped', 'on_hold'))

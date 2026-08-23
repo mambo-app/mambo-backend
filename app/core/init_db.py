@@ -68,14 +68,17 @@ async def init_db(db: AsyncSession):
                 'Tulsa King', 'Stranger Things Season 5', 'Invincible Season 3', 'The Witcher Season 4', 'Euphoria Season 3'
             ) OR tmdb_id IS NULL;
         """))
-        # Merge duplicate watch_history rows created on the same day for a single watch session
+        # Merge duplicate watch_history rows generated from review attachments where watch_type != 'rewatch'
         await db.execute(text("""
             WITH duplicates AS (
                 SELECT id, ROW_NUMBER() OVER (
-                    PARTITION BY user_id, content_id, watched_at::date 
-                    ORDER BY CASE WHEN watch_type = 'first_watch' THEN 1 ELSE 2 END, watched_at ASC
+                    PARTITION BY user_id, content_id 
+                    ORDER BY 
+                        CASE WHEN watch_type = 'first_watch' THEN 1 WHEN watch_type = 'review_only' THEN 2 ELSE 3 END,
+                        watched_at ASC
                 ) as rn
                 FROM watch_history
+                WHERE watch_type != 'rewatch'
             )
             DELETE FROM watch_history WHERE id IN (SELECT id FROM duplicates WHERE rn > 1);
         """))
@@ -86,6 +89,12 @@ async def init_db(db: AsyncSession):
                 SELECT COUNT(*) FROM watch_history wh WHERE wh.user_id = ucs.user_id AND wh.content_id = ucs.content_id
             ), 1)
             WHERE ucs.is_watched = true;
+        """))
+        # Clean stale JSON details in activity_log where watch_count <= 1
+        await db.execute(text("""
+            UPDATE activity_log
+            SET details = details - 'is_rewatch' - 'watch_count'
+            WHERE details IS NOT NULL AND ((details->>'watch_count')::int <= 1 OR details->>'is_rewatch' = 'false');
         """))
         await db.commit()
     except Exception as e:
