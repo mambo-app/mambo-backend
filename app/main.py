@@ -41,9 +41,12 @@ async def lifespan(app: FastAPI):
     logger = logging.getLogger('mambo.scheduler')
 
     # 1. Fast seed purge & date cleanup at startup
-    from sqlalchemy import text
+    from app.core.init_db import init_db
     async with AsyncSessionLocal() as db:
         try:
+            await init_db(db)
+            await db.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS letterboxd_username TEXT;"))
+            await db.execute(text("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS letterboxd_import_status TEXT DEFAULT 'idle';"))
             await db.execute(text("ALTER TABLE content ADD COLUMN IF NOT EXISTS next_episode_to_air JSONB;"))
             await db.execute(text("ALTER TABLE content ADD COLUMN IF NOT EXISTS production_status TEXT;"))
             await db.execute(text("ALTER TABLE content ADD COLUMN IF NOT EXISTS is_announced_no_date BOOLEAN DEFAULT FALSE;"))
@@ -64,7 +67,8 @@ async def lifespan(app: FastAPI):
                 ) OR tmdb_id IS NULL;
             """))
             await db.commit()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Startup schema init error: {e}")
             await db.rollback()
 
     # 2. Define background startup tasks

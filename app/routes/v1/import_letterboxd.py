@@ -68,19 +68,24 @@ async def get_import_status(
 ):
     """Retrieves current Letterboxd import status, progress, live feed, and stats."""
     # 1. Fetch from Database
-    res = await db.execute(text("""
-        SELECT p.letterboxd_username, p.letterboxd_import_status,
-               (SELECT COUNT(*) FROM public.watch_history WHERE user_id = p.id) AS imported_films,
-               (SELECT COUNT(*) FROM public.reviews WHERE user_id = p.id AND is_deleted = false) AS imported_reviews,
-               p.updated_at
-        FROM public.profiles p
-        WHERE p.id = :uid
-    """), {"uid": UUID(user_id)})
-    row = res.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="User profile not found")
+    try:
+        res = await db.execute(text("""
+            SELECT p.letterboxd_username, p.letterboxd_import_status,
+                   (SELECT COUNT(*) FROM public.watch_history WHERE user_id = p.id) AS imported_films,
+                   (SELECT COUNT(*) FROM public.reviews WHERE user_id = p.id AND is_deleted = false) AS imported_reviews,
+                   p.updated_at
+            FROM public.profiles p
+            WHERE p.id = :uid
+        """), {"uid": UUID(user_id)})
+        row = res.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User profile not found")
 
-    letterboxd_username, db_status, db_films, db_reviews, last_synced = row
+        letterboxd_username, db_status, db_films, db_reviews, last_synced = row
+    except Exception as e:
+        logger.warning(f"get_import_status table schema fallback: {e}")
+        await db.rollback()
+        letterboxd_username, db_status, db_films, db_reviews, last_synced = None, "idle", 0, 0, None
 
     # If user has imported items and username, effective status is completed!
     if letterboxd_username and (int(db_films or 0) > 0 or int(db_reviews or 0) > 0 or db_status == "completed"):
