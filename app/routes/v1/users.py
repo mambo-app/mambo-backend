@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, UploadFile, File
+from fastapi import APIRouter, Depends, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 from app.core.database import get_db
@@ -21,6 +21,9 @@ class UpdateProfileRequest(BaseModel):
 
 class TopFavoritesRequest(BaseModel):
     content_ids: list[str]
+
+class PromptPicksRequest(BaseModel):
+    picks: list[str]
 
 class TopFavoritePersonsRequest(BaseModel):
     person_ids: list[str]
@@ -128,6 +131,27 @@ async def set_top_favorites(
     service = UserService(db)
     await service.set_top_favorites(user_id, body.content_ids)
     return ok({"message": "Top favorites updated successfully"})
+
+@router.get('/{username}/prompt-picks')
+async def get_user_prompt_picks(
+    username: str,
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.user_service import UserService
+    service = UserService(db)
+    items = await service.get_prompt_picks(username)
+    return ok({"items": items})
+
+@router.post('/me/prompt-picks')
+async def set_user_prompt_picks(
+    body: PromptPicksRequest,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    from app.services.user_service import UserService
+    service = UserService(db)
+    await service.set_prompt_picks(user_id, body.picks)
+    return ok({"message": "Prompt picks updated successfully"})
 
 @router.post('/me/favorites/person/order')
 async def set_top_favorite_persons(
@@ -315,6 +339,7 @@ async def get_user_reviews(
     limit: int = 50,
     offset: int = 0,
     sort: str = 'desc',
+    item_type: str | None = Query(None, alias="item_type"),
     db: AsyncSession = Depends(get_db),
     viewer_id: str | None = Depends(get_current_user_id_optional),
 ):
@@ -331,7 +356,8 @@ async def get_user_reviews(
         viewer_id=viewer_id,
         limit=limit,
         offset=offset,
-        sort_order=sort
+        sort_order=sort,
+        item_type=item_type
     )
     return ok(reviews)
 

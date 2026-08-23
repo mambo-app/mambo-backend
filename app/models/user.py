@@ -21,6 +21,9 @@ class UserProfile(BaseModel):
     favourites_visibility: str = 'public'
     reviews_visibility: str = 'public'
     push_notifications_enabled: bool = True
+    
+    letterboxd_username: str | None = None
+    letterboxd_import_status: str | None = None
 
     class Config:
         from_attributes = True

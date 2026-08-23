@@ -1,3 +1,4 @@
+import json
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
@@ -18,6 +19,8 @@ class NotificationService:
             await self.db.execute(text("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS actor_id UUID"))
             # related_id is newer
             await self.db.execute(text("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS related_id UUID"))
+            await self.db.execute(text("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS image_url TEXT"))
+            await self.db.execute(text("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS poster_url TEXT"))
             # title might be NOT NULL, make it nullable
             await self.db.execute(text("ALTER TABLE notifications ALTER COLUMN title DROP NOT NULL"))
             await self.db.execute(text("ALTER TABLE notifications ALTER COLUMN type TYPE VARCHAR(50)"))
@@ -111,8 +114,17 @@ class NotificationService:
             # Broadcast to WS
             if new_id:
                 try:
+                    ws_payload = {
+                        "type": "new_notification",
+                        "notification_id": str(new_id),
+                        "title": data.get("title") or "Notification",
+                        "body": data.get("message") or data.get("body") or "",
+                        "image_url": data.get("image_url") or data.get("poster_url"),
+                        "notification_type": str(data.get("type", "general")),
+                        "related_id": str(data["related_id"]) if data.get("related_id") else None
+                    }
                     await ws_manager.send_personal_message(
-                        f'{{"type": "new_notification", "notification_id": "{new_id}"}}', 
+                        json.dumps(ws_payload), 
                         str(data['user_id'])
                     )
                 except Exception as wse:
@@ -163,7 +175,7 @@ class NotificationService:
         "Mark a notification as deleted."
         query = text("""
             UPDATE notifications 
-            SET is_deleted = true, updated_at = now() 
+            SET is_deleted = true 
             WHERE user_id = CAST(:uid AS UUID) AND id = CAST(:nid AS UUID)
         """)
         try:

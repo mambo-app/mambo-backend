@@ -15,25 +15,28 @@ class ConnectionManager:
 
     async def connect(self, user_id: str, websocket: WebSocket):
         await websocket.accept()
-        if user_id not in self.active_connections:
-            self.active_connections[user_id] = set()
-            await self._subscribe_redis(user_id)
-        self.active_connections[user_id].add(websocket)
-        logger.info(f"User {user_id} connected. Total WS for user: {len(self.active_connections[user_id])}")
+        uid = str(user_id).lower()
+        if uid not in self.active_connections:
+            self.active_connections[uid] = set()
+            await self._subscribe_redis(uid)
+        self.active_connections[uid].add(websocket)
+        logger.info(f"User {uid} connected. Total WS for user: {len(self.active_connections[uid])}")
 
     def disconnect(self, user_id: str, websocket: WebSocket):
-        if user_id in self.active_connections:
-            self.active_connections[user_id].discard(websocket)
-            if not self.active_connections[user_id]:
-                self.active_connections.pop(user_id, None)
-                self._unsubscribe_redis(user_id)
-        logger.info(f"User {user_id} disconnected.")
+        uid = str(user_id).lower()
+        if uid in self.active_connections:
+            self.active_connections[uid].discard(websocket)
+            if not self.active_connections[uid]:
+                self.active_connections.pop(uid, None)
+                self._unsubscribe_redis(uid)
+        logger.info(f"User {uid} disconnected.")
 
     async def send_personal_message(self, message: str, user_id: str):
+        uid = str(user_id).lower()
         # Local delivery
-        if user_id in self.active_connections:
+        if uid in self.active_connections:
             closed_socks = set()
-            for connection in self.active_connections[user_id]:
+            for connection in self.active_connections[uid]:
                 try:
                     await connection.send_text(message)
                 except Exception:
@@ -41,7 +44,7 @@ class ConnectionManager:
             
             # Cleanup dead sockets
             for connection in closed_socks:
-                self.disconnect(user_id, connection)
+                self.disconnect(uid, connection)
                 
         # Redis Pub/Sub delivery (multi-instance)
         redis = redis_client.get_client()

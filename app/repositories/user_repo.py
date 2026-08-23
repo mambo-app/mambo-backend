@@ -26,7 +26,9 @@ class UserRepository(BaseRepository):
                            ELSE false
                        END, 
                        false
-                   ) AS is_in_grace_period
+                   ) AS is_in_grace_period,
+                   (SELECT COUNT(DISTINCT content_id) FROM public.watch_history WHERE user_id = p.id AND EXTRACT(year FROM watched_at) = EXTRACT(year FROM now())) AS watched_this_year,
+                   (SELECT COUNT(*) FROM public.reviews WHERE user_id = p.id AND is_deleted = false AND EXTRACT(year FROM created_at) = EXTRACT(year FROM now())) AS reviews_this_year
             FROM profiles p
             LEFT JOIN user_stats us ON us.user_id = p.id
             WHERE p.id = CAST(:user_id AS UUID) AND p.is_deleted = false
@@ -53,7 +55,9 @@ class UserRepository(BaseRepository):
                            ELSE false
                        END, 
                        false
-                   ) AS is_in_grace_period
+                   ) AS is_in_grace_period,
+                   (SELECT COUNT(DISTINCT content_id) FROM public.watch_history WHERE user_id = p.id AND EXTRACT(year FROM watched_at) = EXTRACT(year FROM now())) AS watched_this_year,
+                   (SELECT COUNT(*) FROM public.reviews WHERE user_id = p.id AND is_deleted = false AND EXTRACT(year FROM created_at) = EXTRACT(year FROM now())) AS reviews_this_year
             FROM profiles p
             LEFT JOIN user_stats us ON us.user_id = p.id
             WHERE p.username = :username AND p.is_deleted = false
@@ -326,25 +330,28 @@ class UserRepository(BaseRepository):
                    ucs.updated_at as liked_at, ucs.favorite_order
             FROM user_content_status ucs
             JOIN content c ON c.id = ucs.content_id
-            WHERE ucs.user_id = CAST(:user_id AS UUID) AND ucs.is_liked = true
+            WHERE ucs.user_id = CAST(:user_id AS UUID) AND (ucs.is_liked = true OR ucs.favorite_order IS NOT NULL)
             ORDER BY ucs.favorite_order ASC NULLS LAST, ucs.updated_at DESC
         '''), {'user_id': user_id})
         return [dict(row) for row in result.mappings()]
 
     async def set_top_favorites(self, user_id: str, content_ids: list[str]) -> None:
-        # Reset all first
+        # Reset all favorite_order first for this user
         await self.execute('''
             UPDATE user_content_status 
             SET favorite_order = NULL 
             WHERE user_id = CAST(:uid AS UUID)
         ''', {'uid': user_id})
         
-        # Set new ones in order
+        # Set new ones by position (1..5)
         for i, cid in enumerate(content_ids):
+            if not cid:
+                continue
             await self.execute('''
-                UPDATE user_content_status 
-                SET favorite_order = :order 
-                WHERE user_id = CAST(:uid AS UUID) AND content_id = CAST(:cid AS UUID)
+                INSERT INTO user_content_status (id, user_id, content_id, favorite_order, created_at, updated_at)
+                VALUES (gen_random_uuid(), CAST(:uid AS UUID), CAST(:cid AS UUID), :order, NOW(), NOW())
+                ON CONFLICT (user_id, content_id) 
+                DO UPDATE SET favorite_order = :order, updated_at = NOW()
             ''', {'uid': user_id, 'cid': cid, 'order': i + 1})
         
         await self.db.commit()
@@ -380,3 +387,31 @@ class UserRepository(BaseRepository):
             WHERE user_id = CAST(:uid AS UUID) AND person_id = :pid
         ''', {'uid': user_id, 'pid': person_id})
         return res is not None
+
+    async def get_prompt_picks(self, user_id: str) -> list[dict]:
+        try:
+            return await self.fetch_many('''
+                SELECT p.slot_index, c.id as content_id, c.title, c.poster_url, c.content_type as type, EXTRACT(YEAR FROM c.release_date)::int as release_year
+                FROM user_prompt_picks p
+                JOIN content c ON c.id = p.content_id
+                WHERE p.user_id = CAST(:uid AS UUID)
+                ORDER BY p.slot_index ASC
+            ''', {'uid': user_id})
+        except Exception:
+            return []
+
+    async def set_prompt_picks(self, user_id: str, picks: list[str]) -> None:
+        await self.execute('''
+            DELETE FROM user_prompt_picks WHERE user_id = CAST(:uid AS UUID)
+        ''', {'uid': user_id})
+
+        for i, cid in enumerate(picks):
+            if cid and cid.strip():
+                await self.execute('''
+                    INSERT INTO user_prompt_picks (id, user_id, slot_index, content_id, created_at, updated_at)
+                    VALUES (gen_random_uuid(), CAST(:uid AS UUID), :slot, CAST(:cid AS UUID), NOW(), NOW())
+                    ON CONFLICT (user_id, slot_index)
+                    DO UPDATE SET content_id = EXCLUDED.content_id, updated_at = NOW()
+                ''', {'uid': user_id, 'slot': i + 1, 'cid': cid})
+
+        await self.db.commit()

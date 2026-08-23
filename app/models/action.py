@@ -11,6 +11,7 @@ class ActionType(str, Enum):
     unlike = 'unlike'
     save = 'save'
     unsave = 'unsave'
+    skip = 'skip'
     recommend = 'recommend'
     rate = 'rate'
     unrate = 'unrate'
@@ -22,6 +23,8 @@ class ActionType(str, Enum):
     increment_progress = 'increment_progress'
     complete_season = 'complete_season'
     untrack = 'untrack'
+    unskip = 'unskip'
+    delete_watch = 'delete_watch'
 
 class ContentActionRequest(BaseModel):
     action: ActionType
@@ -30,6 +33,7 @@ class ContentActionRequest(BaseModel):
     status: Optional[str] = None
     season_number: Optional[int] = None
     episode_number: Optional[int] = None
+    watch_history_id: Optional[UUID] = None
 
 class ContentActionResponse(BaseModel):
     status: str

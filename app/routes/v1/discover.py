@@ -7,6 +7,8 @@ from typing import Dict, List, Any, Optional
 from app.models.content import ContentResponse
 from app.models.common import ok
 
+# Updated timestamp 2026-08-23
+
 router = APIRouter(tags=['discover'])
 
 @router.get('/search', response_model=dict[str, Any])
@@ -81,6 +83,42 @@ async def get_swipe_content(
         page=page,
     )
     return ok({"items": items})
+
+@router.get('/{mode}/provider/{provider_id}', response_model=dict[str, Any])
+async def get_discover_by_provider(
+    mode: str,
+    provider_id: int,
+    page: int = Query(1, description="Page number"),
+    db: AsyncSession = Depends(get_db),
+    user_id: Optional[str] = Depends(get_current_user_id_optional)
+):
+    service = ContentService(db)
+    items = await service.get_content_by_provider(mode, provider_id, page=page, user_id=user_id)
+    return ok({"items": items})
+
+@router.get('/calendar/roadmap', response_model=dict[str, Any])
+async def get_calendar_roadmap(
+    mode: str = Query("movie", description="movie, series, anime"),
+    start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
+    days: int = Query(45, description="Window in days"),
+    page: int = Query(1, description="Page number"),
+    db: AsyncSession = Depends(get_db),
+    user_id: Optional[str] = Depends(get_current_user_id_optional),
+):
+    service = ContentService(db)
+    data = await service.get_calendar_roadmap(mode=mode, start_date=start_date, days=days, page=page, user_id=user_id)
+    return ok(data)
+
+@router.get('/calendar/announced', response_model=dict[str, Any])
+async def get_calendar_announced(
+    mode: str = Query("movie", description="movie, series, anime"),
+    page: int = Query(1, description="Page number"),
+    db: AsyncSession = Depends(get_db),
+    user_id: Optional[str] = Depends(get_current_user_id_optional),
+):
+    service = ContentService(db)
+    data = await service.get_calendar_announced(mode=mode, page=page, user_id=user_id)
+    return ok(data)
 
 @router.get('/{mode}', response_model=dict[str, Any])
 async def get_discover(

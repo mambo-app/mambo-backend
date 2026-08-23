@@ -98,7 +98,11 @@ class TestSocialService(unittest.IsolatedAsyncioTestCase):
             await service.respond_to_request(user_id, uuid4(), 'accepted')
         self.assertEqual(cm.exception.status_code, 400)
 
-    async def test_respond_to_request_accept_success(self, MockChat, MockNotif, MockRepo):
+    @patch('app.repositories.user_repo.UserRepository')
+    async def test_respond_to_request_accept_success(self, MockUserRepo, MockChat, MockNotif, MockRepo):
+        mock_user_repo_inst = MockUserRepo.return_value
+        mock_user_repo_inst.follow = AsyncMock()
+
         service = self.get_service(MockChat, MockNotif, MockRepo)
         user_id, sender_id = uuid4(), uuid4()
         req = {'sender_id': sender_id, 'receiver_id': user_id, 'status': 'pending'}
@@ -108,6 +112,24 @@ class TestSocialService(unittest.IsolatedAsyncioTestCase):
         service.repo_mock.add_friend.assert_called_once_with(sender_id, user_id)
         self.assertEqual(service.repo_mock.increment_friends_count.call_count, 2)
         service.notif_mock.create_notification.assert_called_once()
+
+    @patch('app.repositories.user_repo.UserRepository')
+    async def test_remove_friend_success(self, MockUserRepo, MockChat, MockNotif, MockRepo):
+        mock_user_repo_inst = MockUserRepo.return_value
+        mock_user_repo_inst.unfollow = AsyncMock()
+        
+        service = self.get_service(MockChat, MockNotif, MockRepo)
+        user_id, friend_id = uuid4(), uuid4()
+        service.repo_mock.delete_friend.return_value = True
+        
+        result = await service.remove_friend(user_id, friend_id)
+        
+        service.repo_mock.delete_friend.assert_called_once_with(user_id, friend_id)
+        mock_user_repo_inst.unfollow.assert_any_call(str(user_id), str(friend_id))
+        mock_user_repo_inst.unfollow.assert_any_call(str(friend_id), str(user_id))
+        service.repo_mock.decrement_friends_count.assert_any_call(user_id)
+        service.repo_mock.decrement_friends_count.assert_any_call(friend_id)
+        self.assertEqual(result, {"status": "success", "message": "Friend removed successfully"})
 
     # --- Community & Interaction ---
 

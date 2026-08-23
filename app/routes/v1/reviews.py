@@ -2,38 +2,46 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Dict, Any, Optional
 from app.core.database import get_db
-from app.core.dependencies import get_current_user_id
+from app.core.dependencies import get_current_user_id, get_current_user_id_optional
 from app.models.common import ok
 from app.models.social import ReviewCreateRequest, ReviewUpdateRequest, ReviewResponse, CommentCreateRequest, CommentResponse, ShareRequest
 from app.services.social_service import SocialService
+from app.core.logger import get_logger
 from uuid import UUID
 
+logger = get_logger('mambo.reviews')
 router = APIRouter()
 
 @router.get('/trending', response_model=Dict[str, Any])
 async def get_trending_reviews(
     limit: int = Query(10, description="Number of items to fetch"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user_id: Optional[str] = Depends(get_current_user_id_optional)
 ):
     service = SocialService(db)
-    items = await service.get_trending_reviews(limit)
+    user_uuid = UUID(current_user_id) if current_user_id else None
+    items = await service.get_trending_reviews(limit, current_user_id=user_uuid)
     return ok({"items": items})
 
 @router.get('/of-the-day', response_model=Dict[str, Any])
 async def get_review_of_the_day(
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user_id: Optional[str] = Depends(get_current_user_id_optional)
 ):
     service = SocialService(db)
-    item = await service.get_review_of_the_day()
+    user_uuid = UUID(current_user_id) if current_user_id else None
+    item = await service.get_review_of_the_day(current_user_id=user_uuid)
     return ok({"item": item})
 
 @router.get('/{id}', response_model=Dict[str, Any])
 async def get_review(
     id: UUID,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user_id: Optional[str] = Depends(get_current_user_id_optional)
 ):
     service = SocialService(db)
-    result = await service.get_review(id)
+    user_uuid = UUID(current_user_id) if current_user_id else None
+    result = await service.get_review(id, current_user_id=user_uuid)
     return ok(result)
 
 @router.post('/', response_model=Dict[str, Any])
@@ -122,11 +130,36 @@ async def share_review(
 
 @router.get('/content/{content_id}', response_model=Dict[str, Any])
 async def get_reviews_by_content(
-    content_id: UUID,
+    content_id: str,
     limit: int = 20,
     offset: int = 0,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user_id: Optional[str] = Depends(get_current_user_id_optional)
 ):
-    service = SocialService(db)
-    items = await service.get_content_reviews(content_id, limit, offset)
-    return ok({"items": items})
+    from app.services.content_service import ContentService
+    try:
+        # Resolve content_id (could be UUID or TMDB numeric ID)
+        content_svc = ContentService(db)
+        content = await content_svc.get_content_by_id(content_id)
+        if not content:
+            return ok({"items": []})
+        resolved_uuid = content.id
+        tmdb_id = getattr(content, 'tmdb_id', None)
+        title = getattr(content, 'title', None)
+        service = SocialService(db)
+        user_uuid = UUID(current_user_id) if current_user_id else None
+        items = await service.get_content_reviews(
+            content_id=resolved_uuid, 
+            limit=limit, 
+            offset=offset, 
+            current_user_id=user_uuid,
+            tmdb_id=tmdb_id,
+            title=title
+        )
+        return ok({"items": items})
+    except Exception as err:
+        logger.warning(f"Error fetching reviews for content {content_id}: {err}")
+        try:
+            await db.rollback()
+        except Exception: pass
+        return ok({"items": []})

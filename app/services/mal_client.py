@@ -1,5 +1,5 @@
 import httpx
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from app.core.config import settings
 import logging
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -13,25 +13,24 @@ class MALClient:
     def __init__(self):
         self.client_id = settings.mal_client_id
 
-    async def get_trending_anime(self) -> List[Dict[str, Any]]:
-        # Try MAL first
+    async def get_trending_anime(self, page: int = 1) -> List[Dict[str, Any]]:
+        # Try MAL first with 'airing' (currently trending seasonal anime)
         if self.client_id:
             try:
-                # 'bypopularity' or 'all' depending on what is considered 'trending'
-                res = await self._fetch_mal_ranking("bypopularity", limit=10)
+                res = await self._fetch_mal_ranking("airing", limit=20)
                 if res:
                     return res
             except Exception as e:
                 logger.warning(f"MAL trending failed: {e}. Falling back to Jikan.")
         
-        # Fallback to Jikan
+        # Fallback to Jikan airing
         try:
             return await self._fetch_jikan_trending()
         except Exception as e:
             logger.error(f"Jikan trending also failed: {e}")
             return []
 
-    async def get_top_anime(self) -> List[Dict[str, Any]]:
+    async def get_top_anime(self, page: int = 1) -> List[Dict[str, Any]]:
         if self.client_id:
             try:
                 res = await self._fetch_mal_ranking("all", limit=20)
@@ -68,7 +67,7 @@ class MALClient:
                 resp = await client.get(
                     f"{self.JIKAN_URL}/seasons/now",
                     params={"page": page, "limit": 25},
-                    timeout=10.0
+                    timeout=2.5
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -92,7 +91,7 @@ class MALClient:
                 resp = await client.get(
                     f"{self.JIKAN_URL}/seasons/upcoming",
                     params={"limit": 10},
-                    timeout=10.0
+                    timeout=2.5
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -103,6 +102,9 @@ class MALClient:
 
     async def search_anime(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
         """Search for anime on MAL/Jikan."""
+        if not query or len(query.strip()) < 3:
+            return []
+
         if self.client_id:
             try:
                 async with httpx.AsyncClient() as client:
@@ -114,7 +116,7 @@ class MALClient:
                             "limit": limit,
                             "fields": "title,synopsis,mean,genres,num_episodes,start_date,status,studios,main_picture"
                         },
-                        timeout=10.0
+                        timeout=3.0
                     )
                     resp.raise_for_status()
                     data = resp.json()
@@ -128,7 +130,7 @@ class MALClient:
                 resp = await client.get(
                     f"{self.JIKAN_URL}/anime",
                     params={"q": query, "limit": limit},
-                    timeout=10.0
+                    timeout=3.0
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -157,10 +159,10 @@ class MALClient:
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
     async def _fetch_jikan_trending(self) -> List[Dict[str, Any]]:
         async with httpx.AsyncClient() as client:
-            # Jikan 'top anime' sorted by popularity
+            # Jikan currently airing seasonal anime trending today
             resp = await client.get(
                 f"{self.JIKAN_URL}/top/anime",
-                params={"filter": "bypopularity", "limit": 10},
+                params={"filter": "airing", "limit": 20},
                 timeout=10.0
             )
             resp.raise_for_status()
@@ -179,6 +181,19 @@ class MALClient:
             data = resp.json()
             return [self._normalize_jikan(item) for item in data.get("data", [])]
 
+    def _clean_date(self, raw_date: Any) -> Any:
+        if not raw_date or not isinstance(raw_date, str):
+            return raw_date
+        rd = raw_date.strip()
+        if 'T' in rd:
+            rd = rd.split('T')[0]
+        parts = rd.split('-')
+        if len(parts) == 2 and len(parts[0]) == 4:
+            return f"{rd}-01"
+        elif len(parts) == 1 and len(parts[0]) == 4:
+            return f"{rd}-01-01"
+        return rd
+
     def _normalize_mal(self, data: dict) -> dict:
         raw_genres = [g['name'] for g in data.get('genres', [])] if data.get('genres') else []
         # Normalize: Mystery/Police -> Crime
@@ -193,7 +208,7 @@ class MALClient:
             'external_rating': data.get('mean'),
             'external_rating_source': 'mal',
             'total_episodes': data.get('num_episodes'),
-            'release_date':  data.get('start_date'),
+            'release_date':  self._clean_date(data.get('start_date')),
             'status':        self._map_mal_status(data.get('status', '')),
             'poster_url':    data.get('main_picture', {}).get('large') if data.get('main_picture') else None,
             'anime_studio':  data.get('studios', [{}])[0].get('name') if data.get('studios') else None,
@@ -207,10 +222,9 @@ class MALClient:
         if "Mystery" in genres or "Police" in genres:
             if "Crime" not in genres: genres.append("Crime")
 
-        # Jikan often returns ISO strings with time. We only want the date.
+        # Jikan often returns ISO strings with time or YYYY-MM. We normalize date.
         rd = data.get('aired', {}).get('from', '')
-        if rd and 'T' in rd:
-            rd = rd.split('T')[0]
+        clean_rd = self._clean_date(rd)
 
         return {
             'mal_id':        data.get('mal_id'),
@@ -219,7 +233,7 @@ class MALClient:
             'external_rating': data.get('score'),
             'external_rating_source': 'mal',
             'total_episodes': data.get('episodes'),
-            'release_date':  rd,
+            'release_date':  clean_rd,
             'status':        self._map_jikan_status(data.get('status', '')),
             'poster_url':    data.get('images', {}).get('jpg', {}).get('large_image_url') if data.get('images') else None,
             'anime_studio':  data.get('studios', [{}])[0].get('name') if data.get('studios') else None,
@@ -240,3 +254,47 @@ class MALClient:
             'Currently Airing': 'in_production',
             'Not yet aired': 'upcoming',
         }.get(status, 'released')
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
+    async def get_anime_production_status(self, mal_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch production status for an anime from MAL/Jikan."""
+        if self.client_id:
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        f"{self.MAL_URL}/anime/{mal_id}",
+                        headers={"X-MAL-CLIENT-ID": self.client_id},
+                        params={"fields": "status,start_date"},
+                        timeout=5.0
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        st = data.get("status")
+                        mapped_st = "Not yet aired" if st == "not_yet_aired" else st
+                        return {
+                            "mal_id": mal_id,
+                            "status": mapped_st,
+                            "has_air_date": bool(data.get("start_date"))
+                        }
+            except Exception as e:
+                logger.warning(f"MAL get_anime_production_status failed for {mal_id}: {e}")
+
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{self.JIKAN_URL}/anime/{mal_id}",
+                    timeout=5.0
+                )
+                if resp.status_code == 200:
+                    data = resp.json().get("data", {})
+                    st = data.get("status")
+                    aired_from = data.get("aired", {}).get("from")
+                    return {
+                        "mal_id": mal_id,
+                        "status": st,
+                        "has_air_date": bool(aired_from)
+                    }
+        except Exception as e:
+            logger.error(f"Jikan get_anime_production_status failed for {mal_id}: {e}")
+        return None
+

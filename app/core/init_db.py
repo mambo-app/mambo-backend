@@ -43,11 +43,31 @@ async def init_db(db: AsyncSession):
     await add_col("profiles", "search_vector",               "TSVECTOR")
     await add_col("profiles", "is_deleted",                  "BOOLEAN DEFAULT false")
     await add_col("profiles", "updated_at",                  "TIMESTAMPTZ DEFAULT now()")
+    await add_col("profiles", "letterboxd_username",          "TEXT")
+    await add_col("profiles", "letterboxd_import_status",    "TEXT DEFAULT 'idle'")
     
     # --- Data Migration ---
     try:
         # Migration: set existing users to private library if not already set
         await db.execute(text("UPDATE profiles SET library_visibility = 'public' WHERE library_visibility IS NULL"))
+        # Cleanup fake/tentative future release dates stored on returning series in PostgreSQL content table
+        await db.execute(text("""
+            UPDATE content 
+            SET release_date = NULL 
+            WHERE (LOWER(status) LIKE '%returning%' OR LOWER(status) LIKE '%in production%') 
+              AND release_date > CURRENT_DATE
+        """))
+        # Purge fake/mock seed rows inserted during earlier testing
+        await db.execute(text("""
+            DELETE FROM content 
+            WHERE title IN (
+                'Spider-Man: Brand New Day', 'Evil Dead Burn', 'The Devil''s Mouth', '72 HOURS', 
+                'Avatar Aang: The Last Airbender', 'The Last House', 'The End of Oak Street', 'Soulm8te', 'Heartstopper Forever',
+                'IT: Welcome to Derry', 'A Knight of the Seven Kingdoms', 'Pluribus', 'Teach You a Lesson',
+                'Off Campus', 'Spider-Noir', 'Heated Rivalry', 'Dutton Ranch', 'HIS & HERS', 'Marvel Zombies',
+                'Tulsa King', 'Stranger Things Season 5', 'Invincible Season 3', 'The Witcher Season 4', 'Euphoria Season 3'
+            ) OR tmdb_id IS NULL;
+        """))
         await db.commit()
     except Exception as e:
         logger.warning(f"Migration error: {e}")
@@ -78,6 +98,7 @@ async def init_db(db: AsyncSession):
     await add_col("content", "total_episodes",         "INTEGER")
     await add_col("content", "total_seasons",          "INTEGER DEFAULT 1")
     await add_col("content", "seasons",                "JSONB DEFAULT '[]'")
+    await add_col("content", "next_episode_to_air",     "JSONB")
     await add_col("content", "genres",                 "TEXT[] DEFAULT '{}'")
     await add_col("content", "is_permanent",           "BOOLEAN DEFAULT false")
     await add_col("content", "made_permanent_at",      "TIMESTAMPTZ")
@@ -112,6 +133,9 @@ async def init_db(db: AsyncSession):
     await add_col("reviews", "is_deleted",        "BOOLEAN DEFAULT false")
     await add_col("reviews", "deleted_at",        "TIMESTAMPTZ")
     await add_col("reviews", "updated_at",        "TIMESTAMPTZ DEFAULT now()")
+    await add_col("reviews", "tagged_seasons",    "INTEGER[] DEFAULT '{}'")
+    await add_col("reviews", "tagged_episodes",   "INTEGER[] DEFAULT '{}'")
+    await add_col("reviews", "review_type",       "TEXT DEFAULT 'overall'")
 
     try:
         await db.execute(text(
@@ -133,8 +157,18 @@ async def init_db(db: AsyncSession):
     await add_col("collections", "item_count",       "INTEGER DEFAULT 0")
     await add_col("collections", "visibility",       "TEXT DEFAULT 'public'")
     await add_col("collections", "is_pinned",        "BOOLEAN DEFAULT false")
-    await add_col("collections", "pin_order",        "INTEGER DEFAULT 0")
+    await add_col("collections", "is_ranked",        "BOOLEAN DEFAULT false")
+    await add_col("collections", "saves_count",       "INTEGER DEFAULT 0")
     await add_col("collections", "updated_at",       "TIMESTAMPTZ DEFAULT now()")
+    
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.saved_collections (
+            user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+            collection_id uuid NOT NULL REFERENCES public.collections(id) ON DELETE CASCADE,
+            saved_at timestamptz DEFAULT now(),
+            PRIMARY KEY (user_id, collection_id)
+        )
+    '''))
     
     # Migration: Set existing private collections to public (as per new policy)
     try:
@@ -145,6 +179,7 @@ async def init_db(db: AsyncSession):
         await db.rollback()
 
     await add_col("collection_items", "added_by",  "UUID")
+    await add_col("collection_items", "position",  "INTEGER DEFAULT 0")
 
     await add_col("conversations", "direct_pair_key",  "TEXT")
     await add_col("conversations", "title",            "TEXT")
@@ -171,6 +206,8 @@ async def init_db(db: AsyncSession):
 
     await add_col("notifications", "actor_id",             "UUID")
     await add_col("notifications", "related_id",           "UUID")
+    await add_col("notifications", "image_url",            "TEXT")
+    await add_col("notifications", "poster_url",           "TEXT")
     await add_col("notifications", "aggregate_key",        "TEXT")
     await add_col("notifications", "aggregate_count",      "INTEGER DEFAULT 1")
     await add_col("notifications", "first_actor_id",       "UUID")
@@ -189,11 +226,32 @@ async def init_db(db: AsyncSession):
     await add_col("user_content_status", "progress_episodes","INTEGER DEFAULT 0")
     await add_col("user_content_status", "rewatch_count",    "INTEGER DEFAULT 0")
     await add_col("user_content_status", "last_activity_at", "TIMESTAMPTZ DEFAULT now()")
+    await add_col("user_content_status", "is_skipped",        "BOOLEAN DEFAULT false")
 
     await add_col("user_stats", "current_streak", "INTEGER DEFAULT 0")
     await add_col("user_stats", "max_streak",     "INTEGER DEFAULT 0")
     await add_col("user_stats", "last_streak_at", "TIMESTAMPTZ")
     await add_col("user_stats", "badges",          "JSONB DEFAULT '[]'::jsonb")
+
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.collection_groups (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            collection_id uuid NOT NULL REFERENCES public.collections(id) ON DELETE CASCADE,
+            user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+            name text NOT NULL,
+            color text,
+            created_at timestamptz DEFAULT now()
+        );
+    '''))
+
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.collection_group_items (
+            group_id uuid NOT NULL REFERENCES public.collection_groups(id) ON DELETE CASCADE,
+            content_id uuid NOT NULL REFERENCES public.content(id) ON DELETE CASCADE,
+            added_at timestamptz DEFAULT now(),
+            PRIMARY KEY (group_id, content_id)
+        );
+    '''))
 
     await db.execute(text('''
         CREATE TABLE IF NOT EXISTS public.episode_watch_history (
@@ -206,8 +264,23 @@ async def init_db(db: AsyncSession):
             note text,
             watched_at timestamptz DEFAULT now(),
             UNIQUE(user_id, content_id, season_number, episode_number)
-        )
+        );
     '''))
+
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.user_prompt_picks (
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id uuid NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+            slot_index integer NOT NULL,
+            content_id uuid NOT NULL REFERENCES public.content(id) ON DELETE CASCADE,
+            created_at timestamptz DEFAULT now(),
+            updated_at timestamptz DEFAULT now(),
+            UNIQUE(user_id, slot_index)
+        );
+    '''))
+
+    await add_col("episode_watch_history", "rating", "FLOAT")
+    await add_col("episode_watch_history", "note",   "TEXT")
 
     try:
         await db.execute(text("ALTER TABLE public.notifications ALTER COLUMN title DROP NOT NULL"))
@@ -397,9 +470,32 @@ async def init_db(db: AsyncSession):
     # Optimize user_content_status query
     try:
         await db.execute(text("CREATE INDEX IF NOT EXISTS idx_user_content_status_user_status_updated ON public.user_content_status(user_id, status, updated_at DESC)"))
+        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_reviews_created ON public.reviews(created_at DESC)"))
+        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_reviews_user_created ON public.reviews(user_id, created_at DESC)"))
+        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_reviews_content ON public.reviews(content_id)"))
+        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_watch_history_user_watched ON public.watch_history(user_id, watched_at DESC)"))
+        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_messages_conv_sent ON public.messages(conversation_id, sent_at DESC)"))
+        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_review_likes_review_user ON public.review_likes(review_id, user_id)"))
+        await db.execute(text("CREATE INDEX IF NOT EXISTS idx_content_credits_cid_role ON public.content_credits(content_id, role)"))
     except Exception as e:
         logger.warning(f"user_content_status index error: {e}")
         await db.rollback()
+
+    await add_col("reviews", "imported_from", "TEXT")
+    await add_col("watch_history", "imported_from", "TEXT")
+    await add_col("user_content_status", "imported_from", "TEXT")
+    await add_col("messages", "shared_meta", "JSONB")
+    try:
+        await db.execute(text("ALTER TABLE public.messages DROP CONSTRAINT IF EXISTS messages_message_type_check"))
+    except Exception as e:
+        logger.warning(f"Failed to drop messages_message_type_check constraint: {e}")
+
+    await db.execute(text('''
+        CREATE TABLE IF NOT EXISTS public.letterboxd_slug_map (
+            slug TEXT PRIMARY KEY,
+            content_id uuid NOT NULL REFERENCES public.content(id) ON DELETE CASCADE
+        )
+    '''))
 
     await db.commit()
     logger.info("Critical schema initialization completed.")
@@ -427,6 +523,7 @@ async def init_db_data_healing(db: AsyncSession):
         await db.execute(text("UPDATE collections SET collection_type = 'dropped' WHERE name = 'Dropped' AND collection_type NOT IN ('dropped')"))
         await db.execute(text("UPDATE collections SET collection_type = 'watched' WHERE name = 'Watched' AND collection_type NOT IN ('watched')"))
         await db.execute(text("UPDATE collections SET collection_type = 'custom' WHERE collection_type = 'user'"))
+        await db.execute(text("UPDATE collections SET is_public = true, visibility = 'public' WHERE is_default = true OR collection_type IN ('watchlist', 'watched', 'dropped', 'favorites')"))
         await db.execute(text('''
             INSERT INTO collection_items (collection_id, content_id, added_by)
             SELECT c.id, ucs.content_id, ucs.user_id

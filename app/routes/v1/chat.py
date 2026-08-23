@@ -60,13 +60,24 @@ async def send_message(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    body = data.get("body")
+    body = data.get("body") or ""
     receiver_id = data.get("receiver_id")
-    if not body:
-        return ok({"error": "Missing body"}, status="error")
-    
+    shared_meta = data.get("shared_meta") or {}
+    shared_content_id = data.get("shared_content_id") or shared_meta.get("content_id")
+    shared_post_id = data.get("shared_post_id") or shared_meta.get("post_id")
+    shared_review_id = data.get("shared_review_id") or shared_meta.get("review_id")
+
     service = ChatService(db)
-    msg = await service.send_message(user_id, str(conversation_id), body, receiver_id)
+    msg = await service.send_message(
+        user_id, 
+        str(conversation_id), 
+        body, 
+        receiver_id=receiver_id,
+        shared_post_id=shared_post_id,
+        shared_review_id=shared_review_id,
+        shared_content_id=shared_content_id,
+        shared_meta=shared_meta
+    )
     return ok(msg)
 
 @router.post('/{conversation_id}/read', response_model=Dict[str, Any])
@@ -104,6 +115,49 @@ async def search_messages(
     items = await service.search_messages(user_id, str(conversation_id), query)
     return ok({"items": items})
 
+@router.post('/send-test')
+async def send_test_chat(
+    data: Dict[str, Any] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    krrish_id = '32a2fbc0-cd5c-4b3e-a801-e85c033ea674' # krrish04
+    laksh_id = 'c5131ed0-b5e5-4278-8211-1cbfc6ba6910'  # lakshhh
+    
+    service = ChatService(db)
+    conv_id = await service.get_or_create_direct_conversation(krrish_id, laksh_id, bypass_friendship_check=True)
+    
+    msg_text = (data or {}).get("message") or "Hey Laksh! Testing the new Instagram-style in-app DM toast 🚀"
+    
+    msg = await service.send_message(
+        user_id=krrish_id,
+        conversation_id=str(conv_id),
+        body=msg_text,
+        receiver_id=laksh_id,
+        bypass_friendship_check=True
+    )
+    return ok({"status": "sent", "message": msg})
+
+@router.post('/send-typing-test')
+async def send_typing_test_chat(
+    data: Dict[str, Any] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    krrish_id = '32a2fbc0-cd5c-4b3e-a801-e85c033ea674' # krrish04
+    laksh_id = 'c5131ed0-b5e5-4278-8211-1cbfc6ba6910'  # lakshhh
+    
+    service = ChatService(db)
+    conv_id = await service.get_or_create_direct_conversation(krrish_id, laksh_id, bypass_friendship_check=True)
+    is_typing = (data or {}).get("is_typing", True)
+    
+    payload = json.dumps({
+        "type": "typing_status",
+        "conversation_id": str(conv_id),
+        "sender_id": krrish_id,
+        "is_typing": is_typing
+    })
+    await ws_manager.send_personal_message(payload, laksh_id)
+    return ok({"status": "typing_dispatched", "is_typing": is_typing})
+
 @router.websocket('/ws')
 async def chat_websocket(
     websocket: WebSocket,
@@ -124,6 +178,18 @@ async def chat_websocket(
                     body = js.get("body")
                     if cid and body:
                         await service.send_message(user_id, cid, body, rid)
+                elif js.get("type") == "typing":
+                    cid = js.get("conversation_id")
+                    rid = js.get("receiver_id")
+                    is_typing = js.get("is_typing", False)
+                    if cid and rid:
+                        payload = json.dumps({
+                            "type": "typing_status",
+                            "conversation_id": cid,
+                            "sender_id": user_id,
+                            "is_typing": is_typing
+                        })
+                        await ws_manager.send_personal_message(payload, str(rid))
                 elif js.get("type") == "ping":
                     await websocket.send_text(json.dumps({"type": "pong"}))
             except json.JSONDecodeError:

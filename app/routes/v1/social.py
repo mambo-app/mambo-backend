@@ -52,6 +52,15 @@ async def get_friends(
     service = SocialService(db)
     return await service.get_friends(UUID(user_id), limit, offset)
 
+@router.delete('/friends/{friend_id}')
+async def remove_friend(
+    friend_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
+    service = SocialService(db)
+    return await service.remove_friend(UUID(user_id), friend_id)
+
 @router.get('/friend-requests/pending', response_model=List[FriendRequestResponse])
 async def get_pending_requests(
     db: AsyncSession = Depends(get_db),

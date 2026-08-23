@@ -27,12 +27,10 @@ async def register_push_token(
     from app.services.push_service import PushService
     from app.repositories.user_repo import UserRepository # might be needed by PushService
     svc = PushService(db)
-    # save_token typically takes user_id, token, device_type
     try:
         await svc.save_token(user_id, req.token, req.device_type)
         return ok({"success": True})
-    except Exception as e:
-        # Fallback if signature is different
+    except Exception:
         pass
     return ok({"success": True})
 
@@ -80,6 +78,16 @@ async def mark_read(
     await service.mark_as_read(user_id, str(id))
     return ok({"success": True})
 
+@router.delete('/{id}')
+async def delete_notification(
+    id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id),
+):
+    service = NotificationService(db)
+    await service.delete_notification(user_id, str(id))
+    return ok({"success": True})
+
 @router.websocket('/ws')
 async def notification_websocket(
     websocket: WebSocket,
@@ -88,8 +96,6 @@ async def notification_websocket(
     await ws_manager.connect(user_id, websocket)
     try:
         while True:
-            # Notifications connection primarily receives data from backend.
-            # Client could theoretically send {"type": "ping"}
             data = await websocket.receive_text()
             try:
                 js = json.loads(data)
@@ -99,6 +105,52 @@ async def notification_websocket(
                 pass
     except WebSocketDisconnect:
         ws_manager.disconnect(user_id, websocket)
+
+class TestTriggerRequest(BaseModel):
+    user_id: UUID
+    message: str
+
+@router.post('/test-trigger')
+async def test_trigger(
+    req: TestTriggerRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.chat_service import ChatService
+    from app.services.notification_service import NotificationService
+    
+    chat_service = ChatService(db)
+    notif_service = NotificationService(db)
+    
+    krrish_id = '32a2fbc0-cd5c-4b3e-a801-e85c033ea674'
+    
+    # 1. Direct conversation
+    conv_id = await chat_service.get_or_create_direct_conversation(
+        user_id1=krrish_id,
+        user_id2=str(req.user_id),
+        bypass_friendship_check=True
+    )
+    
+    # 2. Send message
+    await chat_service.send_message(
+        user_id=krrish_id,
+        conversation_id=conv_id,
+        body=req.message,
+        receiver_id=str(req.user_id),
+        bypass_friendship_check=True
+    )
+    
+    # 3. Send notification
+    await notif_service.create_notification({
+        'user_id': str(req.user_id),
+        'actor_id': krrish_id,
+        'title': 'krrish04',
+        'message': f"sent you a new message: {req.message[:30]}",
+        'type': 'recommendation',
+        'is_read': False
+    })
+    
+    return ok({"success": True})
+
 @router.delete('/{id}')
 async def delete_notification(
     id: UUID,

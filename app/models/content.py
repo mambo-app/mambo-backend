@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List
+from pydantic import BaseModel, Field, model_validator
+from typing import Optional, List, Union, Dict, Any
 from datetime import date, datetime
 from enum import Enum
 from uuid import UUID
@@ -13,12 +13,15 @@ class ContentStatus(str, Enum):
     NONE = 'none'
 
 class FriendActivityResponse(BaseModel):
-    user_id: UUID
+    user_id: Union[UUID, str]
     username: str
     display_name: Optional[str] = None
     avatar_url: Optional[str] = None
     status: Optional[str] = None # e.g. 'completed', 'plan_to_watch'
     rating: Optional[float] = None
+    progress_episodes: Optional[int] = 0
+    last_watched_season: Optional[int] = 0
+    last_watched_episode: Optional[int] = 0
 
 class CastMemberResponse(BaseModel):
     id: Optional[str] = None
@@ -50,9 +53,15 @@ class ContentResponse(BaseModel):
     original_language: Optional[str] = None
     poster_url: Optional[str] = None
     backdrop_url: Optional[str] = None
+    logo_url: Optional[str] = None
+    title_logo: Optional[str] = None
     genres: List[str] = []
-    release_date: Optional[date] = None
     release_status: Optional[str] = None
+    release_date: Optional[Union[date, str]] = None
+    first_air_date: Optional[Union[date, str]] = None
+    in_production: bool = False
+    next_episode_to_air: Optional[Dict[str, Any]] = None
+    has_next_episode: bool = False
     external_rating: Optional[float] = None
     
     # Mode specific fields
@@ -91,10 +100,25 @@ class ContentResponse(BaseModel):
     vote_count: int = 0
     rating_distribution: List[float] = [0.0, 0.0, 0.0, 0.0, 0.0] # 1 to 5 stars
     
-    friends_activity: List[FriendActivityResponse] = []
+    friends_activity: List[Union[FriendActivityResponse, Dict[str, Any]]] = []
+    watch_history: List[Dict[str, Any]] = []
+    user_review: Optional[Dict[str, Any]] = None
+    review_text: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+    @model_validator(mode='before')
+    @classmethod
+    def sanitize_status_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            status = data.get('status')
+            valid_statuses = {'plan_to_watch', 'watching', 'completed', 'on_hold', 'dropped', 'none'}
+            if status is not None and str(status).lower() not in valid_statuses:
+                if not data.get('release_status'):
+                    data['release_status'] = str(status)
+                data['status'] = 'none'
+        return data
 
 class HomeTrendingResponse(BaseModel):
     movies: List[ContentResponse]

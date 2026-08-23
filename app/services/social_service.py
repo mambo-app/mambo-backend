@@ -72,6 +72,19 @@ class SocialService:
             u_repo = UserRepository(self.db)
             await u_repo.follow(str(request['sender_id']), str(request['receiver_id']))
             await u_repo.follow(str(request['receiver_id']), str(request['sender_id']))
+
+            # Create mutual direct conversation (Requirement 5)
+            try:
+                from app.services.chat_service import ChatService
+                chat_svc = ChatService(self.db)
+                await chat_svc.get_or_create_direct_conversation(
+                    str(request['sender_id']),
+                    str(request['receiver_id']),
+                    bypass_friendship_check=True
+                )
+            except Exception as ce:
+                import logging
+                logging.getLogger('mambo.social').error(f"Failed to auto-create direct conversation: {ce}")
             
             # Update stats - UserRepository.follow already increments followers/following
             # but we also need to increment friends_count specifically.
@@ -97,11 +110,47 @@ class SocialService:
     async def get_friends(self, user_id: UUID, limit: int = 20, offset: int = 0) -> list[dict]:
         return await self.repo.get_friends_list(user_id, limit, offset)
 
+    async def remove_friend(self, user_id: UUID, friend_id: UUID) -> dict:
+        # Delete friendship from repo
+        deleted = await self.repo.delete_friend(user_id, friend_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Friendship not found")
+            
+        # Mutual unfollow
+        from app.repositories.user_repo import UserRepository
+        u_repo = UserRepository(self.db)
+        await u_repo.unfollow(str(user_id), str(friend_id))
+        await u_repo.unfollow(str(friend_id), str(user_id))
+        
+        # Decrement friends count
+        await self.repo.decrement_friends_count(user_id)
+        await self.repo.decrement_friends_count(friend_id)
+        
+        # Delete friend request record between them so they can send requests again
+        await self.db.execute(text('''
+            DELETE FROM friend_requests
+            WHERE (sender_id = :u1 AND receiver_id = :u2)
+               OR (sender_id = :u2 AND receiver_id = :u1)
+        '''), {'u1': user_id, 'u2': friend_id})
+        await self.db.commit()
+        
+        # Invalidate caches
+        from app.services.user_service import UserService
+        u_svc = UserService(self.db)
+        await u_svc.invalidate_profile_cache(str(user_id))
+        await u_svc.invalidate_profile_cache(str(friend_id))
+        
+        return {"status": "success", "message": "Friend removed successfully"}
+
     async def get_pending(self, user_id: UUID) -> list[dict]:
         return await self.repo.get_pending_requests(user_id)
 
-    # --- Phase 3: Community Methods ---
     async def create_post(self, user_id: UUID, title: str, body: str, content_id: UUID | None = None, media_urls: list[str] = [], **kwargs) -> dict:
+        if content_id:
+            from app.services.content_service import ContentService
+            content_svc = ContentService(self.db)
+            content_id = await content_svc.ensure_content_persisted(content_id)
+
         data = {
             'title': title,
             'body': body,
@@ -116,6 +165,20 @@ class SocialService:
         u_svc = UserService(self.db)
         await u_svc.invalidate_profile_cache(str(user_id))
         return post
+
+    async def delete_post(self, user_id: UUID, post_id: UUID) -> bool:
+        post = await self.repo.get_post(post_id)
+        if not post:
+            return True
+        if str(post.get('user_id')) != str(user_id):
+            raise HTTPException(status_code=403, detail="Not authorized to delete this post")
+        deleted = await self.repo.delete_post(user_id, post_id)
+        if deleted:
+            await self.repo.decrement_posts_count(user_id)
+            from app.services.user_service import UserService
+            u_svc = UserService(self.db)
+            await u_svc.invalidate_profile_cache(str(user_id))
+        return True
 
     async def get_posts(self, limit: int = 20, offset: int = 0, viewer_id: UUID | None = None) -> list[dict]:
         return await self.repo.get_posts(limit, offset, viewer_id)
@@ -253,7 +316,7 @@ class SocialService:
     async def share_review(self, user_id: UUID, review_id: UUID, conversation_id: UUID | None = None, recipient_id: UUID | None = None) -> dict:
         return await self.get_share_metadata(user_id, review_id, 'review', conversation_id, recipient_id)
 
-    async def get_user_reviews(self, user_id: UUID, viewer_id: str | None = None, limit: int = 20, offset: int = 0, sort_order: str = 'desc') -> list[dict]:
+    async def get_user_reviews(self, user_id: UUID, viewer_id: str | None = None, limit: int = 20, offset: int = 0, sort_order: str = 'desc', item_type: str | None = None) -> list[dict]:
         # Privacy Check
         from app.services.user_service import UserService
         u_svc = UserService(self.db)
@@ -262,33 +325,40 @@ class SocialService:
         if str(viewer_id) != str(user_id) and profile.get('reviews_visibility') == 'private':
             return []
 
-        return await self.repo.get_reviews_by_user(user_id, limit, offset, sort_order)
+        viewer_uuid = UUID(viewer_id) if viewer_id else None
+        return await self.repo.get_reviews_by_user(user_id, limit, offset, sort_order, current_user_id=viewer_uuid, item_type=item_type)
 
-    async def create_review(self, user_id: UUID, content_id: UUID, star_rating: float, text_review: str, contains_spoiler: bool = False, tags: list[str] = [], tagged_seasons: list[int] = [], tagged_episodes: list[int] = [], review_type: str = "overall") -> dict:
+    async def create_review(
+        self,
+        user_id: UUID,
+        content_id: UUID,
+        star_rating: float,
+        text_review: str | None = None,
+        contains_spoiler: bool = False,
+        tags: list[str] | None = None,
+        tagged_seasons: list[int] | None = None,
+        tagged_episodes: list[int] | None = None,
+        review_type: str = "overall",
+        **kwargs
+    ) -> dict:
+        # 0. Guarantee content row exists in PostgreSQL content table
+        from app.services.content_service import ContentService
+        content_svc = ContentService(self.db)
+        content_id = await content_svc.ensure_content_persisted(content_id)
+
         # 1. Enforce mandatory text
         if not text_review or not text_review.strip():
             raise HTTPException(status_code=400, detail="Review text is mandatory. Use 'Rate' for star-only ratings.")
 
-        # --- UPSERT LOGIC ---
-        # Check if a review for this exact target already exists
-        existing = await self.repo.find_existing_review(
-            user_id, content_id, review_type, tagged_seasons, tagged_episodes
-        )
-        
-        if existing:
-            # If it exists, update it instead of creating a duplicate
-            return await self.update_review(user_id, existing['id'], {
-                'star_rating': star_rating,
-                'text_review': text_review,
-                'contains_spoiler': contains_spoiler,
-                'tagged_seasons': tagged_seasons,
-                'tagged_episodes': tagged_episodes,
-                'review_type': review_type
-            })
+        # Check if the latest watch session is unreviewed
+        session_res = await self.db.execute(text('''
+            SELECT id, review_id FROM watch_history 
+            WHERE user_id = :uid AND content_id = :cid 
+            ORDER BY watched_at DESC LIMIT 1
+        '''), {'uid': user_id, 'cid': content_id})
+        latest_session = session_res.mappings().one_or_none()
 
-        # --- END UPSERT LOGIC ---
-
-        # 2. Find the most recent watch session to link
+        # 2. Find the most recent watch session to link (ONLY if unreviewed)
         from app.services.action_service import ActionService
         from app.models.action import ActionType
         action_svc = ActionService(self.db)
@@ -307,23 +377,18 @@ class SocialService:
         status_row = status_res.mappings().one_or_none() or {}
         is_watched = status_row.get('is_watched') or False
 
-        session_res = await self.db.execute(text('''
-            SELECT id FROM watch_history 
-            WHERE user_id = :uid AND content_id = :cid 
-            ORDER BY watched_at DESC LIMIT 1
-        '''), {'uid': user_id, 'cid': content_id})
-        latest_session = session_res.mappings().one_or_none()
-        
+        # Only use latest session if it doesn't already have a review attached!
+        unreviewed_session = latest_session if (latest_session and latest_session.get('review_id') is None) else None
+
         watch_history_id = None
-        if latest_session and (is_watched or content_type != 'movie'):
-            watch_history_id = latest_session['id']
+        if unreviewed_session:
+            watch_history_id = unreviewed_session['id']
             # Update the rating for this session to match the review
             await self.db.execute(text('''
                 UPDATE watch_history SET rating = :r WHERE id = :wid
             '''), {'r': star_rating, 'wid': watch_history_id})
             
-            # If it is a movie and not yet watched (e.g. they only had a rating_only watch history entry),
-            # mark it as watched/completed and update stats/collections.
+            # Only auto-complete for MOVIES — TV shows require explicit episode tracking
             if content_type == 'movie' and not is_watched:
                 await self.db.execute(text('''
                     UPDATE user_content_status 
@@ -336,9 +401,18 @@ class SocialService:
                 '''), {'uid': user_id})
                 await action_svc._update_streak(user_id)
         else:
-            # Create a new session if none found OR if it's a movie and not yet watched
-            watch_history_id = await action_svc._handle_watch(user_id, content_id, ActionType.watch)
-            # Update the rating for this session to match the review
+            # Create a NEW watch history session for this review
+            if content_type == 'movie':
+                watch_history_id = await action_svc._handle_watch(user_id, content_id, ActionType.watch)
+            else:
+                import uuid as _uuid
+                wh_res = await self.db.execute(text('''
+                    INSERT INTO watch_history (id, user_id, content_id, watch_type, watched_at, rating)
+                    VALUES (:id, :uid, :cid, 'review_only', now(), :r)
+                    RETURNING id
+                '''), {'id': _uuid.uuid4(), 'uid': user_id, 'cid': content_id, 'r': star_rating})
+                watch_history_id = wh_res.scalar()
+
             await self.db.execute(text('''
                 UPDATE watch_history SET rating = :r WHERE id = :wid
             '''), {'r': star_rating, 'wid': watch_history_id})
@@ -395,19 +469,19 @@ class SocialService:
         await self.db.commit()
         return review
 
-    async def get_review(self, review_id: UUID) -> dict:
-        review = await self.repo.get_review(review_id)
+    async def get_review(self, review_id: UUID, current_user_id: UUID | None = None) -> dict:
+        review = await self.repo.get_review(review_id, current_user_id)
         if not review:
             raise HTTPException(status_code=404, detail="Review not found")
         return review
 
-    async def get_trending_reviews(self, limit: int = 5) -> list[dict]:
-        return await self.repo.get_trending_reviews(limit)
+    async def get_trending_reviews(self, limit: int = 5, current_user_id: UUID | None = None) -> list[dict]:
+        return await self.repo.get_trending_reviews(limit, current_user_id)
 
-    async def get_review_of_the_day(self) -> dict | None:
+    async def get_review_of_the_day(self, current_user_id: UUID | None = None) -> dict | None:
         """Picks a random trending review that changes every 24 hours."""
         from datetime import datetime
-        trending = await self.repo.get_trending_reviews(limit=10)
+        trending = await self.repo.get_trending_reviews(limit=10, current_user_id=current_user_id)
         if not trending:
             return None
             
@@ -416,12 +490,12 @@ class SocialService:
         index = seed % len(trending)
         return trending[index]
 
-    async def get_content_reviews(self, content_id: UUID, limit: int = 20, offset: int = 0) -> list[dict]:
-        return await self.repo.get_reviews_by_content(content_id, limit, offset)
+    async def get_content_reviews(self, content_id: UUID, limit: int = 20, offset: int = 0, current_user_id: UUID | None = None, tmdb_id: int | None = None, title: str | None = None) -> list[dict]:
+        return await self.repo.get_reviews_by_content(content_id, limit, offset, current_user_id, tmdb_id=tmdb_id, title=title)
 
-    async def get_content_posts(self, content_id: UUID, limit: int = 20, offset: int = 0) -> list[dict]:
+    async def get_content_posts(self, content_id: UUID, limit: int = 20, offset: int = 0, tmdb_id: int | None = None, title: str | None = None) -> list[dict]:
         """Fetch posts (discussions) related to a specific content item."""
-        return await self.repo.get_posts_by_content(content_id, limit, offset)
+        return await self.repo.get_posts_by_content(content_id, limit, offset, tmdb_id=tmdb_id, title=title)
 
     async def mute_user(self, user_id: UUID, target_id: UUID) -> dict:
         if user_id == target_id:

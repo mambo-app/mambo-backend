@@ -49,32 +49,43 @@ class UserService:
         logger.debug(f'Invalidated profile cache for user {user_id}')
 
     async def get_by_username(self, username: str, viewer_id: str | None) -> dict:
-        result = await self.db.execute(text('''
-            SELECT p.*,
-                   us.followers_count, us.following_count, us.friends_count, us.total_posts,
-                   COALESCE(
-                       CASE 
-                           WHEN us.last_streak_at IS NULL THEN 0
-                           WHEN now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN us.current_streak
-                           ELSE 0
-                       END, 
-                       0
-                   ) AS current_streak,
-                   COALESCE(
-                       CASE 
-                           WHEN us.last_streak_at IS NULL THEN false
-                           WHEN now() AT TIME ZONE 'UTC' >= date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '48 hours'
-                            AND now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN true
-                           ELSE false
-                       END, 
-                       false
-                   ) AS is_in_grace_period
-            FROM profiles p
-            LEFT JOIN user_stats us ON us.user_id = p.id
-            WHERE p.username = :username
-            AND p.is_deleted = false
-        '''), {'username': username})
-        profile = result.mappings().first()
+        try:
+            result = await self.db.execute(text('''
+                SELECT p.*,
+                       us.followers_count, us.following_count, us.friends_count, us.total_posts,
+                       us.total_watched, us.total_reviews,
+                       COALESCE(
+                           CASE 
+                               WHEN us.last_streak_at IS NULL THEN 0
+                               WHEN now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN us.current_streak
+                               ELSE 0
+                           END, 
+                           0
+                       ) AS current_streak,
+                       COALESCE(
+                           CASE 
+                               WHEN us.last_streak_at IS NULL THEN false
+                               WHEN now() AT TIME ZONE 'UTC' >= date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '48 hours'
+                                AND now() AT TIME ZONE 'UTC' < date_trunc('day', us.last_streak_at AT TIME ZONE 'UTC') + interval '60 hours' THEN true
+                               ELSE false
+                           END, 
+                           false
+                       ) AS is_in_grace_period,
+                       (SELECT COUNT(DISTINCT content_id) FROM public.watch_history WHERE user_id = p.id AND EXTRACT(year FROM watched_at) = EXTRACT(year FROM now())) AS watched_this_year,
+                       (SELECT COUNT(*) FROM public.reviews WHERE user_id = p.id AND is_deleted = false AND EXTRACT(year FROM created_at) = EXTRACT(year FROM now())) AS reviews_this_year
+                FROM profiles p
+                LEFT JOIN user_stats us ON us.user_id = p.id
+                WHERE p.username = :username
+                AND p.is_deleted = false
+            '''), {'username': username})
+            profile = result.mappings().first()
+        except Exception as db_err:
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+            raise db_err
+
         if not profile:
             raise NotFoundError('User')
         
@@ -260,6 +271,7 @@ class UserService:
         result = await self.db.execute(text('''
             SELECT p.*, 
                    us.followers_count, us.following_count, us.friends_count, us.total_posts,
+                   us.total_watched, us.total_reviews,
                    COALESCE(
                        CASE 
                            WHEN us.last_streak_at IS NULL THEN 0
@@ -276,7 +288,9 @@ class UserService:
                            ELSE false
                        END, 
                        false
-                   ) AS is_in_grace_period
+                   ) AS is_in_grace_period,
+                   (SELECT COUNT(DISTINCT content_id) FROM public.watch_history WHERE user_id = p.id AND EXTRACT(year FROM watched_at) = EXTRACT(year FROM now())) AS watched_this_year,
+                   (SELECT COUNT(*) FROM public.reviews WHERE user_id = p.id AND is_deleted = false AND EXTRACT(year FROM created_at) = EXTRACT(year FROM now())) AS reviews_this_year
             FROM profiles p
             LEFT JOIN user_stats us ON us.user_id = p.id
             WHERE p.id = CAST(:id AS UUID)
@@ -390,41 +404,52 @@ class UserService:
             if visibility_setting == 'private':
                 return []
         
-        # 1. Cleanup old activity (> 7 days) as requested: "completely gone"
-        await self.db.execute(text('''
-            DELETE FROM activity_log 
-            WHERE user_id = CAST(:owner_id AS UUID) 
-            AND created_at < now() - interval '7 days'
-        '''), {'owner_id': owner_id})
-        await self.db.commit()
-
-        # 2. Fetch recent activity
+        # 1. Fetch recent activity directly (distinct per content)
         result = await self.db.execute(text('''
-            SELECT 
-                al.activity_type, 
-                al.created_at as watched_at,
-                COALESCE(c.title, 'Deleted Content') as title, 
-                c.poster_url, 
-                COALESCE(c.content_type, 'movie') as content_type, 
-                COALESCE(CAST(c.id AS TEXT), '') as content_id,
-                CAST(al.review_id AS TEXT) as review_id,
-                CAST(al.post_id AS TEXT) as post_id,
-                al.details,
-                p.username as actor_username,
-                p.display_name as actor_display_name,
-                ucs.status as user_content_status
-            FROM activity_log al
-            JOIN profiles p ON p.id = al.user_id
-            LEFT JOIN reviews r ON r.id = al.review_id
-            LEFT JOIN content c ON c.id = COALESCE(al.content_id, r.content_id)
-            LEFT JOIN user_content_status ucs ON ucs.content_id = c.id AND ucs.user_id = al.user_id
-            WHERE p.username = :username
-            AND (al.visibility = 'public' OR :is_owner = true)
-            AND (al.review_id IS NULL OR (r.id IS NOT NULL AND r.is_deleted = false))
-            ORDER BY al.created_at DESC
+            WITH ranked_activities AS (
+                SELECT DISTINCT ON (COALESCE(al.content_id, r.content_id))
+                    al.activity_type, 
+                    al.created_at as watched_at,
+                    COALESCE(c.title, 'Deleted Content') as title, 
+                    c.poster_url, 
+                    COALESCE(c.content_type, 'movie') as content_type, 
+                    COALESCE(CAST(c.id AS TEXT), '') as content_id,
+                    COALESCE(CAST(al.review_id AS TEXT), CAST(r2.id AS TEXT)) as review_id,
+                    CAST(al.post_id AS TEXT) as post_id,
+                    al.details,
+                    p.username as actor_username,
+                    p.display_name as actor_display_name,
+                    ucs.status as user_content_status,
+                    COALESCE(r.text_review, r2.text_review) as review_text,
+                    COALESCE(r.rating, r.star_rating, r2.rating, r2.star_rating, CASE WHEN c.content_type = 'movie' THEN ucs.rating ELSE NULL END, (al.details->>'rating')::numeric) as rating,
+                    CASE WHEN (r2.text_review IS NOT NULL AND r2.text_review != '') OR (r.text_review IS NOT NULL AND r.text_review != '') THEN true ELSE false END as has_review,
+                    p.avatar_url as actor_avatar_url
+                FROM activity_log al
+                JOIN profiles p ON p.id = al.user_id
+                LEFT JOIN reviews r ON r.id = al.review_id
+                LEFT JOIN content c ON c.id = COALESCE(al.content_id, r.content_id)
+                LEFT JOIN reviews r2 ON r2.content_id = c.id 
+                    AND r2.user_id = al.user_id 
+                    AND r2.is_deleted = false
+                    AND (
+                        r2.review_type = 'overall'
+                        OR (r2.review_type = 'season' AND (CASE WHEN al.details->>'season' ~ '^[0-9]+$' THEN (al.details->>'season')::int ELSE NULL END) = ANY(r2.tagged_seasons))
+                        OR (r2.review_type = 'episode' AND (CASE WHEN al.details->>'episode' ~ '^[0-9]+$' THEN (al.details->>'episode')::int ELSE NULL END) = ANY(r2.tagged_episodes))
+                    )
+                LEFT JOIN user_content_status ucs ON ucs.content_id = c.id AND ucs.user_id = al.user_id
+                WHERE p.username = :username
+                AND (al.visibility = 'public' OR :is_owner = true)
+                AND (al.review_id IS NULL OR (r.id IS NOT NULL AND r.is_deleted = false))
+                AND (ucs.status IS NULL OR ucs.status NOT IN ('dropped', 'on_hold'))
+                AND NOT (al.activity_type IN ('watched', 'rewatched', 'watching') AND (ucs.status IS NULL OR ucs.status = 'none' OR (c.content_type = 'movie' AND ucs.is_watched = false)))
+                ORDER BY COALESCE(al.content_id, r.content_id), al.created_at DESC
+            )
+            SELECT * FROM ranked_activities
+            ORDER BY watched_at DESC
             LIMIT 30
         '''), {'username': username, 'is_owner': is_owner})
         activities = [dict(row) for row in result.mappings()]
+        activities.sort(key=lambda x: str(x.get('watched_at') or ''), reverse=True)
         
         extra_activities = []
         watched_content_ids = {
@@ -456,8 +481,72 @@ class UserService:
                     
         if extra_activities:
             activities.extend(extra_activities)
-            activities.sort(key=lambda x: x['watched_at'], reverse=True)
-            activities = activities[:30]
+
+        # Fallback: if we have fewer than 5 unique watched/rewatched activities, query user_content_status
+        unique_watched_count = len({act['content_id'] for act in activities if act['activity_type'] in ('watched', 'rewatched') and act['content_id']})
+        if unique_watched_count < 5:
+            ucs_res = await self.db.execute(text('''
+                SELECT 
+                    'watched' as activity_type,
+                    GREATEST(ucs.last_watched_at, ucs.updated_at, ucs.created_at) as watched_at,
+                    COALESCE(c.title, 'Deleted Content') as title,
+                    c.poster_url,
+                    COALESCE(c.content_type, 'movie') as content_type,
+                    COALESCE(CAST(c.id AS TEXT), '') as content_id,
+                    CAST(r.id AS TEXT) as review_id,
+                    NULL as post_id,
+                    CASE 
+                        WHEN c.content_type IN ('series', 'anime', 'tv', 'tv_show') AND ucs.last_watched_season IS NOT NULL THEN
+                            jsonb_build_object('season', ucs.last_watched_season, 'episode', COALESCE(ucs.last_watched_episode, 0))
+                        ELSE NULL 
+                    END as details,
+                    :username as actor_username,
+                    :display_name as actor_display_name,
+                    ucs.status as user_content_status,
+                    r.text_review as review_text,
+                    COALESCE(ucs.rating, r.rating, r.star_rating) as rating,
+                    CASE WHEN r.text_review IS NOT NULL AND r.text_review != '' THEN true ELSE false END as has_review,
+                    :avatar_url as actor_avatar_url
+                FROM user_content_status ucs
+                JOIN content c ON c.id = ucs.content_id
+                LEFT JOIN watch_history wh ON wh.user_id = ucs.user_id AND wh.content_id = c.id
+                LEFT JOIN reviews r ON r.content_id = c.id AND r.user_id = ucs.user_id AND r.is_deleted = false
+                WHERE ucs.user_id = CAST(:owner_id AS UUID)
+                  AND (ucs.status = 'completed' OR (ucs.status = 'watching' AND COALESCE(ucs.progress_episodes, 0) > 0))
+                ORDER BY COALESCE(ucs.last_watched_at, ucs.updated_at, ucs.created_at, wh.watched_at) DESC NULLS LAST
+                LIMIT :fallback_limit
+            '''), {
+                'owner_id': owner_id,
+                'username': username,
+                'display_name': profile.get('display_name'),
+                'avatar_url': profile.get('avatar_url'),
+                'fallback_limit': 15
+            })
+            
+            fallback_items = [dict(row) for row in ucs_res.mappings()]
+            existing_cids = {act['content_id'] for act in activities if act['content_id']}
+            for item in fallback_items:
+                if item['content_id'] not in existing_cids:
+                    activities.append(item)
+                    existing_cids.add(item['content_id'])
+
+        from datetime import datetime, timezone
+        def get_watched_at(x):
+            w = x.get('watched_at')
+            if w is None:
+                return datetime.min.replace(tzinfo=timezone.utc)
+            if not isinstance(w, datetime):
+                try:
+                    from dateutil import parser
+                    w = parser.parse(str(w))
+                except Exception:
+                    return datetime.min.replace(tzinfo=timezone.utc)
+            if w.tzinfo is None:
+                w = w.replace(tzinfo=timezone.utc)
+            return w
+
+        activities.sort(key=get_watched_at, reverse=True)
+        activities = activities[:30]
             
         return activities
 
@@ -519,6 +608,19 @@ class UserService:
         repo = UserRepository(self.db)
         await repo.set_top_favorites(user_id, content_ids)
 
+    async def get_prompt_picks(self, user_id_or_username: str) -> list[dict]:
+        from app.repositories.user_repo import UserRepository
+        repo = UserRepository(self.db)
+        # Check if argument is UUID or username
+        user = await repo.get_by_username(user_id_or_username)
+        target_id = str(user['id']) if user else user_id_or_username
+        return await repo.get_prompt_picks(target_id)
+
+    async def set_prompt_picks(self, user_id: str, picks: list[str]) -> None:
+        from app.repositories.user_repo import UserRepository
+        repo = UserRepository(self.db)
+        await repo.set_prompt_picks(user_id, picks)
+
 
     async def get_received_recommendations(self, username: str) -> list[dict]:
         # Helper to bridge to RecommendationService or use direct query for speed
@@ -544,9 +646,12 @@ class UserService:
         return [dict(row) for row in result.mappings()]
 
     async def get_collections(self, username: str, viewer_id: str | None = None) -> list[dict]:
-        # 1. Resolve username to UUID
-        profile = await self.get_by_username(username, viewer_id)
-        target_user_id = profile['id']
+        # Fast indexed resolution of username to UUID without heavy subqueries
+        res = await self.db.execute(text("SELECT id FROM profiles WHERE username = :u AND is_deleted = false LIMIT 1"), {"u": username})
+        row = res.mappings().one_or_none()
+        if not row:
+            raise NotFoundError('User')
+        target_user_id = row['id']
         
         # 2. Use CollectionService for the optimized data
         from app.services.collection_service import CollectionService
@@ -634,7 +739,9 @@ class UserService:
                         ELSE false
                     END, 
                     false
-                ) AS is_in_grace_period
+                ) AS is_in_grace_period,
+                (SELECT COUNT(DISTINCT content_id) FROM public.watch_history WHERE user_id = CAST(:user_id AS UUID) AND EXTRACT(year FROM watched_at) = EXTRACT(year FROM now())) AS watched_this_year,
+                (SELECT COUNT(*) FROM public.reviews WHERE user_id = CAST(:user_id AS UUID) AND is_deleted = false AND EXTRACT(year FROM created_at) = EXTRACT(year FROM now())) AS reviews_this_year
             FROM user_stats
             WHERE user_id = CAST(:user_id AS UUID)
         '''), {'user_id': user_id})
@@ -651,7 +758,9 @@ class UserService:
                 "current_streak": 0,
                 "max_streak": 0,
                 "last_streak_at": None,
-                "is_in_grace_period": False
+                "is_in_grace_period": False,
+                "watched_this_year": 0,
+                "reviews_this_year": 0
             }
         return dict(stats)
 
@@ -707,10 +816,12 @@ class UserService:
                 c.total_episodes,
                 wh.watched_at,
                 wh.rating,
+                wh.watch_type,
                 c.id as content_id,
                 c.title,
                 c.poster_url,
-                c.genres
+                c.genres,
+                c.release_date
             FROM watch_history wh
             JOIN content c ON wh.content_id = c.id
             WHERE wh.user_id = CAST(:uid AS UUID) {date_filter}
@@ -723,9 +834,13 @@ class UserService:
         series_count = 0
         anime_count = 0
         total_minutes = 0
+        rewatch_count = 0
         
         genre_counts = {}
         rating_counts = [0, 0, 0, 0, 0] # 1 to 5 stars
+        all_user_ratings = []
+        decade_counts = {}
+        day_of_week_counts = {}
         
         content_ratings = {} 
         content_info = {} 
@@ -756,6 +871,9 @@ class UserService:
             cid = str(w['content_id'])
             ctype = w['content_type'] or 'movie'
             
+            if w.get('watch_type') == 'rewatch':
+                rewatch_count += 1
+
             if ctype == 'movie':
                 movies_count += 1
                 total_minutes += 120
@@ -781,25 +899,39 @@ class UserService:
             for g in genres:
                 genre_counts[g] = genre_counts.get(g, 0) + 1
                 
+            # Decades
+            rd_val = w.get('release_date')
+            if rd_val:
+                try:
+                    year = int(str(rd_val)[:4])
+                    decade = f"{(year // 10) * 10}s"
+                    decade_counts[decade] = decade_counts.get(decade, 0) + 1
+                except (ValueError, TypeError): pass
+
             # Ratings
             if w['rating'] is not None:
                 r = float(w['rating'])
-                idx = max(0, min(4, int(r - 1)))
+                r_5star = r / 2.0 if r > 5.0 else r
+                all_user_ratings.append(r_5star)
+                idx = max(0, min(4, int(r_5star - 0.001)))
                 rating_counts[idx] += 1
                 
                 cid = w['content_id']
-                if cid not in content_ratings or r > content_ratings[cid]:
-                    content_ratings[cid] = r
+                if cid not in content_ratings or r_5star > content_ratings[cid]:
+                    content_ratings[cid] = r_5star
                     content_info[cid] = {
                         "content_id": str(cid),
                         "title": w['title'],
                         "poster_url": w['poster_url'],
-                        "rating": r
+                        "rating": r_5star
                     }
             
-            # Timeline Intensity
+            # Timeline Intensity & Day of Week
             dt = w['watched_at']
             if dt:
+                day_name = dt.strftime('%A')
+                day_of_week_counts[day_name] = day_of_week_counts.get(day_name, 0) + 1
+
                 if timeframe in ['week', 'month']:
                     key = dt.strftime('%Y-%m-%d')
                 elif timeframe == 'year':
@@ -817,6 +949,47 @@ class UserService:
         # Aggregate Top Genres
         top_genres = [{"genre": k, "count": v} for k, v in sorted(genre_counts.items(), key=lambda item: item[1], reverse=True)[:5]]
         
+        # Average Rating
+        avg_rating = round(sum(all_user_ratings) / len(all_user_ratings), 1) if all_user_ratings else 0.0
+
+        # Most Active Day
+        most_active_day = max(day_of_week_counts, key=day_of_week_counts.get) if day_of_week_counts else "Weekends"
+
+        # Decades formatted with percentages
+        total_decade_watches = sum(decade_counts.values()) or 1
+        decades = [
+            {"decade": k, "percentage": round((v / total_decade_watches) * 100)}
+            for k, v in sorted(decade_counts.items(), reverse=True)
+        ]
+
+        # Top Directors & Top Actors from DB credits
+        top_directors = []
+        top_actors = []
+        try:
+            dir_res = await self.db.execute(text('''
+                SELECT p.name, p.profile_image_url, COUNT(DISTINCT wh.content_id) as count
+                FROM watch_history wh
+                JOIN content_credits cc ON cc.content_id = wh.content_id
+                JOIN persons p ON p.id = cc.person_id
+                WHERE wh.user_id = CAST(:uid AS UUID) AND (cc.job = 'Director' OR cc.role = 'director')
+                GROUP BY p.id, p.name, p.profile_image_url
+                ORDER BY count DESC LIMIT 5
+            '''), {'uid': user_id})
+            top_directors = [dict(r) for r in dir_res.mappings()]
+
+            act_res = await self.db.execute(text('''
+                SELECT p.name, p.profile_image_url, COUNT(DISTINCT wh.content_id) as count
+                FROM watch_history wh
+                JOIN content_credits cc ON cc.content_id = wh.content_id
+                JOIN persons p ON p.id = cc.person_id
+                WHERE wh.user_id = CAST(:uid AS UUID) AND cc.role = 'cast'
+                GROUP BY p.id, p.name, p.profile_image_url
+                ORDER BY count DESC LIMIT 5
+            '''), {'uid': user_id})
+            top_actors = [dict(r) for r in act_res.mappings()]
+        except Exception as cred_err:
+            logger.warning(f"Failed fetching directors/actors stats: {cred_err}")
+
         biggest_binge_date = None
         biggest_binge_count = 0
         if daily_watches:
@@ -837,6 +1010,12 @@ class UserService:
             "movies_count": movies_count,
             "series_count": series_count,
             "anime_count": anime_count,
+            "avg_rating": avg_rating,
+            "rewatch_count": rewatch_count,
+            "most_active_day": most_active_day,
+            "decades": decades,
+            "top_directors": top_directors,
+            "top_actors": top_actors,
             "top_rated": top_rated,
             "timeline_intensity": timeline_formatted,
             "rating_distribution": rating_counts,

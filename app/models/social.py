@@ -5,13 +5,14 @@ from uuid import UUID
 
 class ReviewCreateRequest(BaseModel):
     content_id: UUID
-    star_rating: float = Field(..., ge=1, le=10)
+    star_rating: Optional[float] = Field(None, ge=1, le=10)
     text_review: Optional[str] = None
     contains_spoiler: bool = False
     tags: List[str] = []
     tagged_seasons: List[int] = []
     tagged_episodes: List[int] = []
     review_type: str = "overall"
+    watch_history_id: Optional[UUID] = None
 
 class ReviewUpdateRequest(BaseModel):
     star_rating: Optional[float] = Field(None, ge=1, le=10)
@@ -21,21 +22,24 @@ class ReviewUpdateRequest(BaseModel):
     tagged_seasons: Optional[List[int]] = None
     tagged_episodes: Optional[List[int]] = None
     review_type: Optional[str] = None
+    watch_history_id: Optional[UUID] = None
 
 class ReviewResponse(BaseModel):
     id: UUID
     user_id: UUID
     content_id: UUID
-    star_rating: int
+    star_rating: Optional[float] = None
     text_review: Optional[str] = None
-    contains_spoiler: bool
-    tags: List[str]
-    likes_count: int
-    comments_count: int
-    shares_count: int
-    saves_count: int
+    contains_spoiler: bool = False
+    tags: List[str] = []
+    watch_history_id: Optional[UUID] = None
+    likes_count: int = 0
+    comments_count: int = 0
+    shares_count: int = 0
+    saves_count: int = 0
     created_at: datetime
     updated_at: datetime
+    is_liked: bool = False
 
 class CommentCreateRequest(BaseModel):
     content: str

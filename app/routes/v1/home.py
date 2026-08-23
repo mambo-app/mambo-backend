@@ -21,9 +21,12 @@ async def get_trending(
     return ok(data.model_dump())
 
 @router.get('/spotlight', response_model=Dict[str, Any])
-async def get_spotlight(db: AsyncSession = Depends(get_db)):
+async def get_spotlight(
+    content_type: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db)
+):
     service = ContentService(db)
-    items = await service.get_spotlight()
+    items = await service.get_spotlight(content_type)
     return ok({"items": items})
 
 @router.get('/hot-reviews', response_model=Dict[str, Any])

@@ -17,9 +17,14 @@ class ActionService:
 
     async def handle_action(self, user_id: UUID, content_id: UUID, req: ContentActionRequest) -> ContentActionResponse:
         try:
-            # 0. Fetch content details to check release date
+            # 0. Guarantee content row exists in PostgreSQL content table
+            from app.services.content_service import ContentService
+            content_svc = ContentService(self.db)
+            content_id = await content_svc.ensure_content_persisted(content_id)
+
+            # Fetch content details to check release date & poster
             content_res = await self.db.execute(text(
-                "SELECT title, release_date FROM content WHERE id = :id"
+                "SELECT title, poster_url, release_date FROM content WHERE id = :id"
             ), {"id": content_id})
             content = content_res.mappings().one_or_none()
             
@@ -27,7 +32,13 @@ class ActionService:
                 raise HTTPException(status_code=404, detail="Content not found")
             
             release_date = content.get('release_date')
-            is_future = bool(release_date and release_date > date.today())
+            rd_date_obj = None
+            if isinstance(release_date, str):
+                try: rd_date_obj = date.fromisoformat(release_date.split('T')[0])
+                except Exception: pass
+            elif isinstance(release_date, datetime): rd_date_obj = release_date.date()
+            elif isinstance(release_date, date): rd_date_obj = release_date
+            is_future = bool(rd_date_obj and rd_date_obj > date.today())
 
             # 1. Block actions if content is not yet released
             restricted_actions = [
@@ -98,6 +109,10 @@ class ActionService:
                 await self._update_status_flag(user_id, content_id, 'is_interested', False)
                 await self._remove_activity(user_id, ['interested', 'saved'], content_id=content_id)
                 await self._remove_from_collection(user_id, content_id, 'Watchlist')
+            elif req.action == ActionType.skip:
+                await self._update_status_flag(user_id, content_id, 'is_skipped', True)
+            elif req.action == ActionType.unskip:
+                await self._update_status_flag(user_id, content_id, 'is_skipped', False)
             elif req.action == ActionType.recommend:
                 # Recommendations are NOT irreversible as requested
                 pass
@@ -121,16 +136,29 @@ class ActionService:
                     'type': 'calendar_alert',
                     'title': content['title'],
                     'message': "is now tracked for release alerts.",
+                    'image_url': content.get('poster_url'),
                     'related_id': content_id
                 })
             elif req.action == ActionType.unnotify:
                 await self.db.execute(text('''
-                    DELETE FROM calendar_alerts WHERE user_id = :uid AND content_id = :cid
+                    DELETE FROM calendar_alerts 
+                    WHERE user_id = :uid 
+                      AND (
+                        content_id = :cid 
+                        OR content_id IN (
+                          SELECT c2.id FROM content c1 JOIN content c2 ON (
+                            (c1.tmdb_id IS NOT NULL AND c1.tmdb_id = c2.tmdb_id) OR 
+                            (c1.mal_id IS NOT NULL AND c1.mal_id = c2.mal_id)
+                          ) WHERE c1.id = :cid
+                        )
+                      )
                 '''), {'uid': user_id, 'cid': content_id})
             elif req.action == ActionType.untrack:
                 # FULL RESET: Clear status, collections, and history
                 await self._revert_watch(user_id, content_id)
                 await self._remove_activity(user_id, ['watched', 'rewatched', 'dropped', 'interested'], content_id=content_id)
+            elif req.action == ActionType.delete_watch:
+                await self._delete_single_watch(user_id, content_id, req.watch_history_id)
 
             elif req.action == ActionType.set_status:
                 if not req.status:
@@ -165,6 +193,13 @@ class ActionService:
                     await self._sync_to_collection(user_id, content_id, 'Watchlist')
                 
                 # 3. Log activity based on status
+                # First, remove all previous status-transition activities so only the
+                # current status is reflected in the feed (e.g. no stale 'watched' after changing to 'watching')
+                await self._remove_activity(
+                    user_id,
+                    ['watched', 'rewatched', 'watching', 'on_hold', 'dropped', 'interested'],
+                    content_id=content_id
+                )
                 activity_map = {
                     'completed': 'watched',
                     'dropped': 'dropped',
@@ -183,19 +218,27 @@ class ActionService:
                 if req.season_number is None or req.episode_number is None:
                     raise HTTPException(status_code=400, detail="Season and Episode numbers required")
                 
-                # 1. Log episode watch
-                await self.db.execute(text('''
-                    INSERT INTO episode_watch_history (user_id, content_id, season_number, episode_number)
-                    VALUES (:uid, :cid, :sn, :en)
-                    ON CONFLICT (user_id, content_id, season_number, episode_number) DO UPDATE SET
-                        watched_at = now()
-                '''), {'uid': user_id, 'cid': content_id, 'sn': req.season_number, 'en': req.episode_number})
+                # Fetch current season progress to check if they watched multiple episodes
+                prev_res = await self.db.execute(text('''
+                    SELECT progress_episodes FROM user_season_status 
+                    WHERE user_id = :uid AND content_id = :cid AND season_number = :sn
+                '''), {'uid': user_id, 'cid': content_id, 'sn': req.season_number})
+                prev_row = prev_res.mappings().one_or_none()
+                old_progress = prev_row.get('progress_episodes') if prev_row else 0
+
+                # 1. Log episode watch (and intermediate ones if any)
+                start_ep = old_progress + 1 if old_progress is not None and old_progress < req.episode_number else req.episode_number
+                for ep in range(start_ep, req.episode_number + 1):
+                    await self.db.execute(text('''
+                        INSERT INTO episode_watch_history (user_id, content_id, season_number, episode_number)
+                        VALUES (:uid, :cid, :sn, :en)
+                        ON CONFLICT (user_id, content_id, season_number, episode_number) DO UPDATE SET
+                            watched_at = now()
+                    '''), {'uid': user_id, 'cid': content_id, 'sn': req.season_number, 'en': ep})
 
                 # 2. Update progress count (MAX of current progress or this episode)
                 # Season 0 Rule: Ignore Season 0 (Specials) for main progression
                 if req.season_number != 0:
-                    logger.info(f"Saving watch_episode for user {user_id}, content {content_id}: S{req.season_number} E{req.episode_number}")
-                    # 1. Update overall status
                     logger.info(f"Saving watch_episode for user {user_id}, content {content_id}: S{req.season_number} E{req.episode_number}")
                     await self.db.execute(text('''
                         INSERT INTO user_content_status (user_id, content_id, progress_episodes, last_watched_season, last_watched_episode, status, last_activity_at, updated_at)
@@ -253,8 +296,18 @@ class ActionService:
                             updated_at = now()
                     '''), {'uid': user_id, 'cid': content_id})
 
+                act_details = {
+                    'season': req.season_number,
+                    'season_number': req.season_number,
+                    'seasons_watched': req.season_number,
+                    'episode': req.episode_number,
+                    'episode_number': req.episode_number,
+                    'episodes_watched': req.episode_number,
+                }
+                if req.episode_number > start_ep:
+                    act_details['start_episode'] = start_ep
                 await self._log_activity(user_id, 'watched', content_id=content_id, 
-                                        details={'season': req.season_number, 'episode': req.episode_number})
+                                        details=act_details)
                 
                 # Update Streak
                 await self._update_streak(user_id)
@@ -355,6 +408,15 @@ class ActionService:
                 await self._recalculate_series_progression(user_id, content_id)
 
             await self.db.commit()
+            try:
+                from app.services.cache_service import cache, CacheKeys
+                today_str = date.today().isoformat()
+                uid_str = str(user_id)
+                for m in ['movies', 'series', 'anime']:
+                    key = f"v2:{CacheKeys.discover(m, uid_str, today_str)}"
+                    await cache.delete(key)
+            except Exception as cache_err:
+                logger.error(f"Failed to invalidate discover cache after action: {cache_err}")
             return ContentActionResponse(
                 status="success",
                 action=req.action,
@@ -441,10 +503,17 @@ class ActionService:
         """
         query = '''
             SELECT 
-                wh.id, wh.rating, wh.watched_at, wh.watch_type,
-                c.id as content_id, c.title, c.poster_url, c.content_type
+                wh.id, 
+                COALESCE(wh.rating, r.rating, ucs.rating) as rating, 
+                wh.watched_at, wh.watch_type,
+                c.id as content_id, c.title, c.poster_url, c.content_type,
+                c.release_date,
+                COALESCE(ucs.is_liked, false) as is_liked,
+                (r.id IS NOT NULL AND r.is_deleted = false) as has_review
             FROM watch_history wh
             JOIN content c ON wh.content_id = c.id
+            LEFT JOIN user_content_status ucs ON ucs.content_id = wh.content_id AND ucs.user_id = wh.user_id
+            LEFT JOIN reviews r ON r.content_id = wh.content_id AND r.user_id = wh.user_id AND r.is_deleted = false
             WHERE wh.user_id = :uid
             ORDER BY wh.watched_at DESC
             LIMIT :limit OFFSET :offset
@@ -519,6 +588,8 @@ class ActionService:
 
         # 7. Auto-remove from watchlist
         await self._auto_remove_from_watchlist(user_id, content_id)
+
+        return watch_id
 
     async def _handle_rate(self, user_id: UUID, content_id: UUID, rating: float):
         # Fetch content type
@@ -720,7 +791,7 @@ class ActionService:
             INSERT INTO activity_log (id, user_id, activity_type, content_id, review_id, post_id, 
                                    collection_id, news_id, related_user_id, details, visibility, is_rewatch)
             VALUES (:id, :user_id, :activity_type, :content_id, :review_id, :post_id, 
-                    :collection_id, :news_id, :related_user_id, :details, :visibility, :is_rewatch)
+                    :collection_id, :news_id, :related_user_id, CAST(:details AS JSONB), :visibility, :is_rewatch)
         ''')
         await self.db.execute(stmt, {
             'id': uuid.uuid4(),
@@ -767,11 +838,13 @@ class ActionService:
             DELETE FROM episode_watch_history WHERE user_id = :uid AND content_id = :cid
         '''), {'uid': user_id, 'cid': content_id})
 
-        # 3. Delete ALL watch history for this content
+        # 3. Delete ALL watch history and activity logs for this content
         await self.db.execute(text('''
             DELETE FROM watch_history 
             WHERE user_id = :uid AND content_id = :cid
         '''), {'uid': user_id, 'cid': content_id})
+
+        await self._remove_activity(user_id, ['watched', 'rewatched', 'watching', 'dropped', 'interested'], content_id=content_id)
 
         # 4. Decrement user_stats by the FULL count
         await self.db.execute(text('''
@@ -780,6 +853,90 @@ class ActionService:
                 updated_at = now()
             WHERE user_id = :uid
         '''), {'uid': user_id, 'count': count_to_remove})
+
+        # Invalidate profile cache
+        from app.services.user_service import UserService
+        u_svc = UserService(self.db)
+        await u_svc.invalidate_profile_cache(str(user_id))
+
+    async def _delete_single_watch(self, user_id: UUID, content_id: UUID, watch_history_id: Optional[UUID] = None):
+        # 1. Target the specified watch entry or the latest one
+        if watch_history_id:
+            del_res = await self.db.execute(text('''
+                DELETE FROM watch_history
+                WHERE id = :wid AND user_id = :uid AND content_id = :cid
+                RETURNING id, rating, review_id
+            '''), {'wid': watch_history_id, 'uid': user_id, 'cid': content_id})
+        else:
+            del_res = await self.db.execute(text('''
+                DELETE FROM watch_history
+                WHERE id = (
+                    SELECT id FROM watch_history
+                    WHERE user_id = :uid AND content_id = :cid
+                    ORDER BY watched_at DESC LIMIT 1
+                )
+                RETURNING id, rating, review_id
+            '''), {'uid': user_id, 'cid': content_id})
+
+        deleted_row = del_res.mappings().one_or_none()
+        if not deleted_row:
+            return
+
+        wid = deleted_row['id']
+        rid = deleted_row['review_id']
+
+        # 2. Clear review link if present
+        if rid:
+            await self.db.execute(text('''
+                UPDATE reviews SET watch_history_id = NULL WHERE id = :rid
+            '''), {'rid': rid})
+
+        # 3. Delete activity log entry for this specific watch history ID
+        await self.db.execute(text('''
+            DELETE FROM activity_log 
+            WHERE user_id = :uid AND content_id = :cid AND (review_id = :rid OR details->>'watch_history_id' = :wid_str)
+        '''), {'uid': user_id, 'cid': content_id, 'rid': rid, 'wid_str': str(wid)})
+
+        # 4. Recalculate watch_count and latest status
+        count_res = await self.db.execute(text('''
+            SELECT count(*) FROM watch_history WHERE user_id = :uid AND content_id = :cid
+        '''), {'uid': user_id, 'cid': content_id})
+        new_count = count_res.scalar() or 0
+
+        if new_count == 0:
+            await self.db.execute(text('''
+                UPDATE user_content_status
+                SET is_watched = false, status = 'none', watch_count = 0, rating = NULL, updated_at = now()
+                WHERE user_id = :uid AND content_id = :cid
+            '''), {'uid': user_id, 'cid': content_id})
+            await self._remove_from_collection(user_id, content_id, 'Watched')
+        else:
+            # Fetch latest watched_at and latest rating
+            latest_res = await self.db.execute(text('''
+                SELECT watched_at, rating FROM watch_history
+                WHERE user_id = :uid AND content_id = :cid
+                ORDER BY watched_at DESC LIMIT 1
+            '''), {'uid': user_id, 'cid': content_id})
+            latest_row = latest_res.mappings().one_or_none()
+            last_dt = latest_row['watched_at'] if latest_row else None
+            last_r = latest_row['rating'] if latest_row else None
+
+            await self.db.execute(text('''
+                UPDATE user_content_status
+                SET watch_count = :cnt,
+                    last_watched_at = :last_dt,
+                    rating = :last_r,
+                    updated_at = now()
+                WHERE user_id = :uid AND content_id = :cid
+            '''), {'cnt': new_count, 'last_dt': last_dt, 'last_r': last_r, 'uid': user_id, 'cid': content_id})
+
+        # 5. Decrement user_stats total_watched by 1
+        await self.db.execute(text('''
+            UPDATE user_stats
+            SET total_watched = GREATEST(0, total_watched - 1),
+                updated_at = now()
+            WHERE user_id = :uid
+        '''), {'uid': user_id})
 
         # Invalidate profile cache
         from app.services.user_service import UserService
