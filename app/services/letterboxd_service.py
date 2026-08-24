@@ -34,38 +34,55 @@ class LetterboxdService:
             count += 0.5
         return count if count > 0 else None
 
+    def _fetch_url(self, url: str, timeout: int = 25) -> Optional[str]:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        scraper_key = getattr(settings, 'scraperapi_key', None) or os.getenv("SCRAPERAPI_KEY")
+        if scraper_key:
+            import requests
+            try:
+                params = {"api_key": scraper_key, "url": url, "keep_headers": "true", "render": "false"}
+                resp = requests.get("https://api.scraperapi.com", params=params, headers=headers, timeout=timeout)
+                if resp.status_code == 200 and resp.text:
+                    return resp.text
+            except Exception as e:
+                logger.warning(f"ScraperAPI fetch failed for {url}: {e}")
+
+        try:
+            scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+            resp = scraper.get(url, headers=headers, timeout=timeout)
+            if resp.status_code == 200 and resp.text:
+                return resp.text
+        except Exception:
+            pass
+
+        import requests
+        try:
+            resp = requests.get(url, headers=headers, timeout=timeout)
+            if resp.status_code == 200 and resp.text:
+                return resp.text
+        except Exception:
+            pass
+
+        return None
+
     async def fetch_profile(self, username: str) -> dict:
-        """Fetches basic profile info using cloudscraper."""
+        """Fetches basic profile info using ScraperAPI / cloudscraper."""
         loop = asyncio.get_event_loop()
         try:
-            # cloudscraper calls must run in an executor since it is synchronous
             def scrape():
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                }
                 url = f"https://letterboxd.com/{username}/"
-                try:
-                    scraper = cloudscraper.create_scraper(
-                        browser={"browser": "chrome", "platform": "windows", "mobile": False}
-                    )
-                    resp = scraper.get(url, headers=headers, timeout=12)
-                    if resp.status_code == 200:
-                        return resp.text
-                except Exception:
-                    pass
+                res_text = self._fetch_url(url)
+                if res_text:
+                    return res_text
 
-                import requests
+                # Fallback: Open RSS Feed
                 try:
-                    resp = requests.get(url, headers=headers, timeout=12)
-                    if resp.status_code == 200:
-                        return resp.text
-                except Exception:
-                    pass
-
-                # Fallback: Open RSS Feed (Never blocked by Cloudflare datacenter IP rules)
-                try:
+                    import requests
+                    headers = {"User-Agent": "Mozilla/5.0"}
                     rss_url = f"https://letterboxd.com/{username}/rss/"
                     resp = requests.get(rss_url, headers=headers, timeout=12)
                     if resp.status_code == 200 and "<rss" in resp.text:
@@ -936,13 +953,13 @@ class LetterboxdService:
                 check_cancelled()
                 sync_progress[user_id]["current_item"] = "Fetching watched films list..."
                 films = []
-                for p in range(1, 20): # fetch up to 20 pages (~1440 items) for complete history
+                for p in range(1, 25): # fetch up to 25 pages (~1800 items)
                     check_cancelled()
                     try:
-                        resp = scraper.get(f"https://letterboxd.com/{username}/films/page/{p}/", headers=headers_chrome, timeout=12)
-                        if resp.status_code != 200:
+                        html = self._fetch_url(f"https://letterboxd.com/{username}/films/page/{p}/")
+                        if not html:
                             break
-                        soup = BeautifulSoup(resp.text, "html.parser")
+                        soup = BeautifulSoup(html, "html.parser")
                         items = []
                         for div in soup.find_all(attrs={"data-item-slug": True}):
                             slug = div.get("data-item-slug", "").strip()
@@ -963,8 +980,9 @@ class LetterboxdService:
                     try:
                         import requests
                         import xml.etree.ElementTree as ET
+                        headers_basic = {"User-Agent": "Mozilla/5.0"}
                         rss_url = f"https://letterboxd.com/{username}/rss/"
-                        rss_resp = requests.get(rss_url, headers=headers_chrome, timeout=12)
+                        rss_resp = requests.get(rss_url, headers=headers_basic, timeout=12)
                         if rss_resp.status_code == 200 and "<rss" in rss_resp.text:
                             root = ET.fromstring(rss_resp.text)
                             channel = root.find("channel")
@@ -991,10 +1009,10 @@ class LetterboxdService:
                 while True:
                     check_cancelled()
                     try:
-                        resp = scraper.get(f"https://letterboxd.com/{username}/watchlist/page/{p}/", headers=headers_chrome, timeout=12)
-                        if resp.status_code != 200:
+                        html = self._fetch_url(f"https://letterboxd.com/{username}/watchlist/page/{p}/")
+                        if not html:
                             break
-                        soup = BeautifulSoup(resp.text, "html.parser")
+                        soup = BeautifulSoup(html, "html.parser")
                         slugs = list(dict.fromkeys(re.findall(r'data-item-slug="([^"]+)"', str(soup))))
                         if not slugs:
                             break
@@ -1012,7 +1030,10 @@ class LetterboxdService:
                 p = 1
                 while True:
                     check_cancelled()
-                    soup = BeautifulSoup(scraper.get(f"https://letterboxd.com/{username}/likes/films/page/{p}/").text, "html.parser")
+                    html = self._fetch_url(f"https://letterboxd.com/{username}/likes/films/page/{p}/")
+                    if not html:
+                        break
+                    soup = BeautifulSoup(html, "html.parser")
                     slugs = list(dict.fromkeys(re.findall(r'data-item-slug="([^"]+)"', str(soup))))
                     if not slugs:
                         break
@@ -1021,21 +1042,20 @@ class LetterboxdService:
                         break
                     p += 1
 
-                # Fetch Reviews (all pages — no artificial limit)
+                # Fetch Reviews (all pages)
                 check_cancelled()
                 sync_progress[user_id]["current_item"] = "Fetching reviews..."
                 reviews = []
                 p = 1
                 while True:
                     check_cancelled()
-                    resp = scraper.get(f"https://letterboxd.com/{username}/reviews/page/{p}/")
-                    if resp.status_code != 200:
+                    html = self._fetch_url(f"https://letterboxd.com/{username}/reviews/page/{p}/")
+                    if not html:
                         break
-                    soup = BeautifulSoup(resp.text, "html.parser")
+                    soup = BeautifulSoup(html, "html.parser")
                     listitems = soup.select(".listitem")
                     items = []
                     for item in listitems:
-                        # 1. Extract slug from the title link
                         a_tag = item.select_one("h2.primaryname a")
                         if not a_tag:
                             continue
@@ -1046,17 +1066,14 @@ class LetterboxdService:
                         if not slug:
                             continue
                         
-                        # 2. Extract review text
                         body_text_div = item.select_one("div.body-text")
                         review_text = body_text_div.get_text(separator="\n").strip() if body_text_div else None
                         if not review_text:
-                            continue  # skip rating-only entries on reviews page
+                            continue
                         
-                        # 3. Extract rating
                         rating_title = item.select_one("span.inline-rating svg title")
                         rating = self.parse_stars(rating_title.get_text()) if rating_title else None
                         
-                        # 4. Extract watch date
                         time_tag = item.select_one("time.timestamp")
                         watch_date = None
                         if time_tag:
@@ -1085,10 +1102,9 @@ class LetterboxdService:
                 sync_progress[user_id]["current_item"] = "Fetching custom lists..."
                 custom_lists = []
                 try:
-                    lists_resp = scraper.get(f"https://letterboxd.com/{username}/lists/")
-                    if lists_resp.status_code == 200:
-                        lists_soup = BeautifulSoup(lists_resp.text, "html.parser")
-                        # Match Letterboxd list link elements across all layout variations
+                    lists_html = self._fetch_url(f"https://letterboxd.com/{username}/lists/")
+                    if lists_html:
+                        lists_soup = BeautifulSoup(lists_html, "html.parser")
                         list_links = lists_soup.select("h2.title-2 a, h2.title a, .headline-2 a, a.list-link, .film-list-card a, section.list-summary a")
                         seen_list_hrefs = set()
                         for link in list_links:
@@ -1098,9 +1114,9 @@ class LetterboxdService:
                             if list_href and "/list/" in list_href and list_href not in seen_list_hrefs and list_title:
                                 seen_list_hrefs.add(list_href)
                                 full_url = list_href if list_href.startswith("http") else f"https://letterboxd.com{list_href}"
-                                l_resp = scraper.get(full_url)
-                                if l_resp.status_code == 200:
-                                    l_soup = BeautifulSoup(l_resp.text, "html.parser")
+                                l_html = self._fetch_url(full_url)
+                                if l_html:
+                                    l_soup = BeautifulSoup(l_html, "html.parser")
                                     desc_el = l_soup.select_one(".body-text.-short p, .body-text p, .description p")
                                     l_desc = desc_el.get_text(strip=True) if desc_el else f"Imported from Letterboxd: {list_title}"
                                     l_items = []
@@ -1177,9 +1193,42 @@ class LetterboxdService:
             with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
                 namelist = z.namelist()
                 
-                # 1. Watched list
+                def _parse_date(dt_str: Optional[str]) -> Optional[date]:
+                    if not dt_str:
+                        return None
+                    s = str(dt_str).strip()
+                    if not s:
+                        return None
+                    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y/%m/%d"):
+                        try:
+                            return datetime.strptime(s.split('.')[0], fmt).date()
+                        except Exception:
+                            pass
+                    return None
+
+                # 1. Watched & Diary list
+                diary_file = next((f for f in namelist if f.endswith("diary.csv")), None)
+                if diary_file:
+                    with z.open(diary_file) as f:
+                        reader = csv.DictReader(io.TextIOWrapper(f, encoding='utf-8'))
+                        for row in reader:
+                            uri = row.get("Letterboxd URI", "")
+                            slug = uri.split("/film/")[-1].strip("/") if "/film/" in uri else ""
+                            if "/" in slug:
+                                slug = slug.split("/")[0]
+                            watch_date = _parse_date(row.get("Watched Date") or row.get("Date"))
+                            rating_str = row.get("Rating")
+                            rating_val = float(rating_str) if rating_str else None
+                            if slug:
+                                data["films"].append({
+                                    "slug": slug,
+                                    "watch_date": watch_date,
+                                    "rating": rating_val
+                                })
+
                 watched_file = next((f for f in namelist if f.endswith("watched.csv")), None)
                 if watched_file:
+                    watched_slugs = {f["slug"] for f in data["films"] if f.get("slug")}
                     with z.open(watched_file) as f:
                         reader = csv.DictReader(io.TextIOWrapper(f, encoding='utf-8'))
                         for row in reader:
@@ -1187,19 +1236,13 @@ class LetterboxdService:
                             slug = uri.split("/film/")[-1].strip("/") if "/film/" in uri else ""
                             if "/" in slug:
                                 slug = slug.split("/")[0]
-                            
-                            dt_str = row.get("Date")
-                            watch_date = None
-                            if dt_str:
-                                try:
-                                    watch_date = datetime.strptime(dt_str, "%Y-%m-%d").date()
-                                except Exception:
-                                    pass
-                                    
-                            data["films"].append({
-                                "slug": slug,
-                                "watch_date": watch_date
-                            })
+                            if slug and slug not in watched_slugs:
+                                watch_date = _parse_date(row.get("Date"))
+                                data["films"].append({
+                                    "slug": slug,
+                                    "watch_date": watch_date
+                                })
+                                watched_slugs.add(slug)
 
                 # 2. Ratings backfill (including rated-only films)
                 ratings_file = next((f for f in namelist if f.endswith("ratings.csv")), None)
@@ -1216,15 +1259,8 @@ class LetterboxdService:
                             if slug:
                                 rating_val = float(row.get("Rating", 0.0))
                                 ratings_map[slug] = rating_val
-                                # If not in watched list, add it to data["films"] so it gets imported
                                 if slug not in watched_slugs:
-                                    dt_str = row.get("Date")
-                                    watch_date = None
-                                    if dt_str:
-                                        try:
-                                            watch_date = datetime.strptime(dt_str, "%Y-%m-%d").date()
-                                        except Exception:
-                                            pass
+                                    watch_date = _parse_date(row.get("Date"))
                                     data["films"].append({
                                         "slug": slug,
                                         "watch_date": watch_date,
@@ -1245,15 +1281,7 @@ class LetterboxdService:
                             slug = uri.split("/film/")[-1].strip("/") if "/film/" in uri else ""
                             if "/" in slug:
                                 slug = slug.split("/")[0]
-                            
-                            dt_str = row.get("Date")
-                            watch_date = None
-                            if dt_str:
-                                try:
-                                    watch_date = datetime.strptime(dt_str, "%Y-%m-%d").date()
-                                except Exception:
-                                    pass
-
+                            watch_date = _parse_date(row.get("Date"))
                             data["reviews"].append({
                                 "slug": slug,
                                 "review_text": row.get("Review"),
@@ -1276,7 +1304,7 @@ class LetterboxdService:
                             })
 
                 # 5. Liked films
-                likes_file = next((f for f in namelist if f.endswith("likes.csv")), None)
+                likes_file = next((f for f in namelist if f.endswith("likes.csv") or "likes/films.csv" in f or "likes.csv" in f), None)
                 if likes_file:
                     with z.open(likes_file) as f:
                         reader = csv.DictReader(io.TextIOWrapper(f, encoding='utf-8'))

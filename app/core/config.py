@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     sentry_dsn: str = ''
     tmdb_api_key: str = ''
     mal_client_id: str = ''
+    scraperapi_key: str = 'f6fefc5783fc51458243cdb91c4d8f9d'
     news_api: str = ''
     app_env: str = 'development'
     invite_key: str = 'B3G1N'

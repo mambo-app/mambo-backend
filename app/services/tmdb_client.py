@@ -953,6 +953,7 @@ class TMDBClient:
                     "episode_count": s.get("episode_count")
                 } for s in item.get("seasons", []) if s.get("season_number", 0) > 0
             ],
+            "next_episode_to_air": item.get("next_episode_to_air"),
             "status": item.get("status")
         }
 

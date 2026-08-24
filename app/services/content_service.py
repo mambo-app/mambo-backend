@@ -997,8 +997,33 @@ class ContentService:
             external_items = g_list + i_list
 
         elif mode == 'series':
-            res_airing = await self.tmdb_client.discover_series_by_date_range(start_str, end_str, page=page)
-            external_items = res_airing if isinstance(res_airing, list) else []
+            pages_res = await asyncio.gather(
+                *[self.tmdb_client.discover_series_by_date_range(start_str, end_str, page=p) for p in range(1, 4)],
+                return_exceptions=True
+            )
+            raw_series = []
+            for pr in pages_res:
+                if isinstance(pr, list):
+                    raw_series.extend(pr)
+            
+            # Enrich series items with details (including next_episode_to_air) concurrently
+            top_ids = [s.get('tmdb_id') or s.get('id') for s in raw_series if s.get('tmdb_id') or s.get('id')][:40]
+            details_res = await asyncio.gather(
+                *[self.tmdb_client.get_series_details(str(tid)) for tid in top_ids if tid],
+                return_exceptions=True
+            )
+            details_map = {}
+            for dr in details_res:
+                if isinstance(dr, dict) and dr.get('id'):
+                    details_map[str(dr['id'])] = dr
+                    
+            external_items = []
+            for s in raw_series:
+                sid = str(s.get('tmdb_id') or s.get('id') or '')
+                if sid in details_map:
+                    external_items.append(details_map[sid])
+                else:
+                    external_items.append(s)
 
         else: # anime
             res_anime = await self.mal_client.get_current_season_anime(page=page)

@@ -588,8 +588,22 @@ class UserService:
 
     async def set_prompt_picks(self, user_id: str, picks: list[str]) -> None:
         from app.repositories.user_repo import UserRepository
+        from app.services.content_service import ContentService
+        content_svc = ContentService(self.db)
+        
+        resolved_picks = []
+        for p in picks:
+            if p and str(p).strip():
+                try:
+                    uuid_val = await content_svc.ensure_content_persisted(str(p).strip())
+                    resolved_picks.append(str(uuid_val))
+                except Exception:
+                    resolved_picks.append("")
+            else:
+                resolved_picks.append("")
+
         repo = UserRepository(self.db)
-        await repo.set_prompt_picks(user_id, picks)
+        await repo.set_prompt_picks(user_id, resolved_picks)
 
 
     async def get_received_recommendations(self, username: str) -> list[dict]:
