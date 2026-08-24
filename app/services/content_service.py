@@ -962,6 +962,22 @@ class ContentService:
         try:
             cached = await cache.get(cache_key)
             if cached and isinstance(cached, dict):
+                if user_id:
+                    cached_items = cached.get('items', [])
+                    await self._populate_user_status(cached_items, user_id)
+                    def _sort_key(x):
+                        is_user_show = bool(
+                            x.get('is_watched') or x.get('is_liked') or x.get('is_interested') or
+                            x.get('is_notified') or (x.get('watch_count') or 0) > 0 or
+                            (x.get('progress_episodes') or 0) > 0 or
+                            (x.get('status') and str(x.get('status')).lower() not in ('none', ''))
+                        )
+                        tier = 0 if is_user_show else 1
+                        d_obj = _parse_date_obj(x.get('release_date'))
+                        d_val = d_obj if d_obj else date(9999, 12, 31)
+                        return (tier, d_val)
+                    cached_items.sort(key=_sort_key)
+                    cached['items'] = cached_items
                 return cached
         except Exception: pass
 
@@ -1168,14 +1184,34 @@ class ContentService:
         except Exception as e_undated:
             logger.warning(f"Undated DB calendar query exception: {e_undated}")
 
-        # 3. Sort dated items strictly by parsed release_date ASC (chronological order)
+        # 3. Attach user status if user_id is provided
+        if user_id:
+            try:
+                await self._populate_user_status(items, user_id)
+                if undated_db_items:
+                    await self._populate_user_status(undated_db_items, user_id)
+            except Exception as u_err:
+                logger.warning(f"User status population error in calendar_roadmap: {u_err}")
+
+        # 4. Sort dated items: User's tracked/watched/interested/notified shows first (Tier 0), then global discovery shows (Tier 1), both chronologically by air date
         def _sort_key(x):
+            is_user_show = bool(
+                x.get('is_watched') or
+                x.get('is_liked') or
+                x.get('is_interested') or
+                x.get('is_notified') or
+                (x.get('watch_count') or 0) > 0 or
+                (x.get('progress_episodes') or 0) > 0 or
+                (x.get('status') and str(x.get('status')).lower() not in ('none', ''))
+            )
+            tier = 0 if is_user_show else 1
             d_obj = _parse_date_obj(x.get('release_date'))
-            return d_obj if d_obj else date(9999, 12, 31)
+            d_val = d_obj if d_obj else date(9999, 12, 31)
+            return (tier, d_val)
 
         items.sort(key=_sort_key)
 
-        # 4. Append undated / TBA items to the bottom of the timeline
+        # 5. Append undated / TBA items to the bottom of the timeline
         for u_item in undated_db_items:
             t_key = str(u_item.get('title', '')).strip().lower()
             if t_key and t_key not in seen_titles:
@@ -2754,17 +2790,7 @@ class ContentService:
                 false as is_notified
             FROM content c
             JOIN user_content_status ucs ON ucs.content_id = c.id AND ucs.user_id = :uid
-            WHERE (
-                (:has_uuids AND c.id = ANY(:uuids)) OR
-                (:has_tids AND c.tmdb_id = ANY(:tids)) OR
-                (:has_mids AND c.mal_id = ANY(:mids))
-            )
-        '''), {
-            'uid': uid_obj,
-            'has_uuids': bool(uuids), 'uuids': uuids or [UUID('00000000-0000-0000-0000-000000000000')],
-            'has_tids': bool(tmdb_ids), 'tids': tmdb_ids or [-1],
-            'has_mids': bool(mal_ids), 'mids': mal_ids or [-1]
-        })
+        '''), {'uid': uid_obj})
         
         status_rows = res.mappings().fetchall()
         uuid_map = {str(r['content_id']): r for r in status_rows}
