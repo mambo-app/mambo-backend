@@ -40,8 +40,9 @@ async def lifespan(app: FastAPI):
 
     logger = logging.getLogger('mambo.scheduler')
 
-    # 1. Fast seed purge & date cleanup at startup
+    # 1. Fast schema verification at startup
     from app.core.init_db import init_db
+    from sqlalchemy import text
     async with AsyncSessionLocal() as db:
         try:
             await init_db(db)
@@ -55,20 +56,9 @@ async def lifespan(app: FastAPI):
             await db.execute(text("ALTER TABLE content ADD COLUMN IF NOT EXISTS status_last_verified_at TIMESTAMP;"))
             await db.execute(text("CREATE INDEX IF NOT EXISTS idx_content_announced ON content (content_type, is_announced_no_date) WHERE is_announced_no_date = TRUE;"))
             await db.execute(text("CREATE INDEX IF NOT EXISTS idx_content_status_verify ON content (status_last_verified_at) WHERE is_permanent = TRUE OR status_last_verified_at IS NOT NULL;"))
-            await db.execute(text("""
-                DELETE FROM content 
-                WHERE title IN (
-                    'Spider-Man: Brand New Day', 'Evil Dead Burn', 'The Devil''s Mouth', '72 HOURS', 
-                    'Avatar Aang: The Last Airbender', 'The Last House', 'The End of Oak Street', 'Soulm8te', 'Heartstopper Forever',
-                    'IT: Welcome to Derry', 'A Knight of the Seven Kingdoms', 'Pluribus', 'Teach You a Lesson',
-                    'Off Campus', 'Spider-Noir', 'Heated Rivalry', 'Dutton Ranch', 'HIS & HERS', 'Marvel Zombies',
-                    'Tulsa King', 'Stranger Things Season 5', 'Invincible Season 3', 'The Witcher Season 4', 'Euphoria Season 3',
-                    'The Odyssey', 'Toy Story 5', 'Rage of Stars', 'Colony', 'Minions & Monsters', 'Obsession', 'The Death of Robin Hood'
-                ) OR tmdb_id IS NULL;
-            """))
             await db.commit()
         except Exception as e:
-            logger.warning(f"Startup schema init error: {e}")
+            logger.warning(f"Startup schema init warning: {e}")
             await db.rollback()
 
     # 2. Define background startup tasks
