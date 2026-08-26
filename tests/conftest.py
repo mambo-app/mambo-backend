@@ -16,6 +16,14 @@ os.environ['APP_ENV'] = 'test'
 os.environ['ADMIN_SECRET'] = 'test_admin_secret'
 os.environ['INVITE_KEY'] = 'test_invite_key'
 
+# ENFORCE Dedicated Test Database (dev-laksh2 branch) for all pytest runs
+TEST_POOL = os.environ.get('TEST_DATABASE_POOL_URL', 'postgresql://neondb_owner:npg_qFZAmX6Uc1Yk@ep-holy-math-a1wub3pv-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require')
+TEST_DIRECT = os.environ.get('TEST_DATABASE_DIRECT_URL', 'postgresql://neondb_owner:npg_qFZAmX6Uc1Yk@ep-holy-math-a1wub3pv.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require')
+
+os.environ['DATABASE_POOL_URL'] = TEST_POOL
+os.environ['DATABASE_DIRECT_URL'] = TEST_DIRECT
+
+
 SCHEMA_SQL = """
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 

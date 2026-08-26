@@ -449,7 +449,6 @@ class SocialRepository(BaseRepository):
         
         include_reviews = item_type is None or item_type.lower() in ('all', 'review', 'reviews')
         include_ratings = item_type is None or item_type.lower() in ('all', 'rating', 'ratings')
-        include_discussions = item_type is None or item_type.lower() in ('all', 'discussion', 'discussions', 'review', 'reviews')
         
         # If specifically asking for written reviews/posts (e.g. for Posts tab), exclude star-only ratings
         if item_type and item_type.lower() in ('review', 'reviews'):
@@ -505,42 +504,13 @@ class SocialRepository(BaseRepository):
                 )
             ''')
 
-        if include_discussions:
-            queries.append('''
-                SELECT p.id, p.user_id, p.content_id, NULL as rating, p.body, false as is_spoiler, p.created_at,
-                       NULL as star_rating,
-                       false as contains_spoiler,
-                       'overall' as review_type, ARRAY[]::int[] as tagged_seasons, ARRAY[]::int[] as tagged_episodes,
-                       pr.username, pr.avatar_url, pr.is_verified,
-                       c.title as content_title,
-                       c.poster_url as content_poster,
-                       c.genres, c.original_language, c.release_date,
-                       'discussion' as item_type,
-                       p.upvotes_count, p.comments_count,
-                       p.title,
-                       COALESCE((SELECT 1 FROM post_upvotes WHERE user_id = :current_user_id AND post_id = p.id LIMIT 1), 0) = 1 AS is_liked,
-                       false as is_rewatch
-                FROM posts p
-                JOIN profiles pr ON pr.id = p.user_id
-                LEFT JOIN content c ON c.id = p.content_id
-                WHERE p.user_id = :user_id
-            ''')
-
         if not queries:
             return []
 
         full_query = " UNION ALL ".join([f"({q})" for q in queries]) + f" ORDER BY created_at {order_sql} LIMIT :limit OFFSET :offset"
         items = await self.fetch_many(full_query, {'user_id': user_id, 'limit': limit, 'offset': offset, 'current_user_id': current_user_id})
 
-        # Deduplicate entries by (content_id, body, created_at)
-        seen = set()
-        deduped = []
-        for item in items:
-            key = (item.get('content_id'), item.get('body'), str(item.get('created_at'))[:10])
-            if key not in seen:
-                seen.add(key)
-                deduped.append(item)
-        return deduped
+        return items
 
     async def get_trending_reviews(self, limit: int = 5, current_user_id: UUID | None = None) -> list[dict]:
         # If limit is 10 (the explore feed default), override to 40 and sort by latest first
