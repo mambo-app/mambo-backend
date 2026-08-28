@@ -205,6 +205,49 @@ async def run_verification():
             import traceback
             traceback.print_exc()
 
+    # --- TEST 4: ON HOLD and DROPPED Status Updates ---
+    print("\n--- Running Test 4: ON HOLD & DROPPED Status Updates ---")
+    async with AsyncSessionLocal() as db:
+        try:
+            # 1. Run init_db to ensure constraints are dropped
+            from app.core.init_db import init_db
+            await init_db(db)
+
+            action_svc = ActionService(db)
+
+            # 2. Test setting status to 'on_hold'
+            print("Testing handle_action with status='on_hold'...")
+            res_on_hold = await action_svc.handle_action(
+                user_a_id,
+                content_id,
+                ContentActionRequest(action=ActionType.set_status, status='on_hold')
+            )
+            assert res_on_hold.status == 'success', f"on_hold status action should return status success, got {res_on_hold.status}"
+
+            ucs_res = await db.execute(text("SELECT status FROM user_content_status WHERE user_id = :uid AND content_id = :cid"), {'uid': user_a_id, 'cid': content_id})
+            ucs_row = ucs_res.mappings().one()
+            assert ucs_row['status'] == 'on_hold', "user_content_status should be 'on_hold'"
+            print("Status 'on_hold' verified successfully!")
+
+            # 3. Test setting status to 'dropped'
+            print("Testing handle_action with status='dropped'...")
+            res_dropped = await action_svc.handle_action(
+                user_a_id,
+                content_id,
+                ContentActionRequest(action=ActionType.set_status, status='dropped')
+            )
+            assert res_dropped.status == 'success', f"dropped status action should return status success, got {res_dropped.status}"
+
+            ucs_res2 = await db.execute(text("SELECT status FROM user_content_status WHERE user_id = :uid AND content_id = :cid"), {'uid': user_a_id, 'cid': content_id})
+            ucs_row2 = ucs_res2.mappings().one()
+            assert ucs_row2['status'] == 'dropped', "user_content_status should be 'dropped'"
+            print("Status 'dropped' verified successfully!")
+
+        except Exception as e:
+            print(f"FAIL: Test 4 failed: {e}")
+            import traceback
+            traceback.print_exc()
+
     # --- CLEANUP ---
     print("\n--- Cleaning up test data ---")
     async with AsyncSessionLocal() as db:

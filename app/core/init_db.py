@@ -443,6 +443,14 @@ async def init_db(db: AsyncSession):
     await add_col("activity_log", "related_user_id",  "UUID")
     await add_col("activity_log", "is_rewatch",       "BOOLEAN DEFAULT false")
 
+    try:
+        # Drop restrictive activity_type check that blocks new activity types like on_hold and dropped
+        await db.execute(text("ALTER TABLE public.activity_log DROP CONSTRAINT IF EXISTS activity_log_activity_type_check"))
+    except Exception as e:
+        logger.warning(f"Failed to drop activity_log_activity_type_check constraint: {e}")
+        await db.rollback()
+
+
     await db.execute(text('''
         CREATE TABLE IF NOT EXISTS public.error_logs (
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

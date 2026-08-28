@@ -31,7 +31,8 @@ class Settings(BaseSettings):
         return self.app_env == 'production'
 
     model_config = {
-        "env_file": ".env"
+        "env_file": ".env",
+        "extra": "ignore"
     }
 
 @lru_cache()

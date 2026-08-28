@@ -754,11 +754,16 @@ class ContentService:
 
             strict_anticipated.append(item)
 
-        strict_anticipated.sort(key=lambda x: (
-            x.get('release_date') is None,
-            -float(x.get('popularity') or x.get('vote_count') or 0),
-            str(x.get('release_date', '9999'))
-        ))
+        def _ant_sort_key(x):
+            d_obj = _parse_date_obj(x.get('release_date'))
+            d_str = d_obj.isoformat() if d_obj else '9999-12-31'
+            return (
+                d_obj is None,
+                d_str,
+                -float(x.get('popularity') or x.get('vote_count') or 0)
+            )
+
+        strict_anticipated.sort(key=_ant_sort_key)
         ant_db = strict_anticipated[:60]
 
         async def _db_latest_query(limit=30) -> List[Dict[str, Any]]:
