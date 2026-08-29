@@ -248,6 +248,21 @@ async def run_verification():
             import traceback
             traceback.print_exc()
 
+    # --- TEST 5: Discover Anime Mode (_parse_date_obj verification) ---
+    print("\n--- Running Test 5: Discover Anime Mode (_parse_date_obj verification) ---")
+    async with AsyncSessionLocal() as db:
+        try:
+            from app.services.content_service import ContentService
+            cs = ContentService(db)
+            print("Testing get_discover_content('anime')...")
+            res_anime = await cs.get_discover_content('anime')
+            assert res_anime is not None, "get_discover_content('anime') should return a result dict"
+            print("Discover Anime Mode verified successfully!")
+        except Exception as e:
+            print(f"FAIL: Test 5 failed: {e}")
+            import traceback
+            traceback.print_exc()
+
     # --- CLEANUP ---
     print("\n--- Cleaning up test data ---")
     async with AsyncSessionLocal() as db:

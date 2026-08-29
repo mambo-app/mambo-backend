@@ -754,6 +754,29 @@ class ContentService:
 
             strict_anticipated.append(item)
 
+        def _parse_date_obj(val: Any) -> Optional[date]:
+            if not val:
+                return None
+            if isinstance(val, date) and not isinstance(val, datetime):
+                return val
+            if isinstance(val, datetime):
+                return val.date()
+            if isinstance(val, str):
+                s = val.strip()
+                if not s:
+                    return None
+                try:
+                    parts = s.split('T')[0].split('-')
+                    if len(parts) == 1 and len(parts[0]) == 4:
+                        return date(int(parts[0]), 1, 1)
+                    elif len(parts) == 2 and len(parts[0]) == 4:
+                        return date(int(parts[0]), int(parts[1]), 1)
+                    else:
+                        return date.fromisoformat(s.split('T')[0])
+                except Exception:
+                    return None
+            return None
+
         def _ant_sort_key(x):
             d_obj = _parse_date_obj(x.get('release_date'))
             d_str = d_obj.isoformat() if d_obj else '9999-12-31'
