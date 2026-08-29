@@ -30,6 +30,21 @@ async def get_collections(
     items = await service.get_user_collections(UUID(user_id))
     return ok({"items": items})
 
+@router.get('/item-status/{content_id}', response_model=Dict[str, Any])
+async def get_content_collection_status(
+    content_id: str,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user_id)
+):
+    content_uuid = await _resolve_content_id(content_id, db, auto_import=False)
+    if not content_uuid:
+        # If the content doesn't exist locally, it cannot be in any collection
+        return ok({"collection_ids": []})
+
+    service = CollectionService(db)
+    collection_ids = await service.get_content_collection_status(UUID(user_id), content_uuid)
+    return ok({"collection_ids": collection_ids})
+
 @router.get('/{id}', response_model=Dict[str, Any])
 async def get_collection(
     id: UUID,
@@ -271,20 +286,7 @@ async def remove_item_from_collection(
         raise HTTPException(status_code=403, detail="Not authorized to modify this collection or item not found")
     return ok({"success": True})
 
-@router.get('/item-status/{content_id}', response_model=Dict[str, Any])
-async def get_content_collection_status(
-    content_id: str,
-    db: AsyncSession = Depends(get_db),
-    user_id: str = Depends(get_current_user_id)
-):
-    content_uuid = await _resolve_content_id(content_id, db, auto_import=False)
-    if not content_uuid:
-        # If the content doesn't exist locally, it cannot be in any collection
-        return ok({"collection_ids": []})
 
-    service = CollectionService(db)
-    collection_ids = await service.get_content_collection_status(UUID(user_id), content_uuid)
-    return ok({"collection_ids": collection_ids})
 
 @router.put('/{id}/reorder-items', response_model=Dict[str, Any])
 async def reorder_collection_items(

@@ -33,6 +33,42 @@ async def get_review_of_the_day(
     item = await service.get_review_of_the_day(current_user_id=user_uuid)
     return ok({"item": item})
 
+@router.get('/content/{content_id}', response_model=Dict[str, Any])
+async def get_reviews_by_content(
+    content_id: str,
+    limit: int = 20,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    current_user_id: Optional[str] = Depends(get_current_user_id_optional)
+):
+    from app.services.content_service import ContentService
+    try:
+        # Resolve content_id (could be UUID or TMDB numeric ID)
+        content_svc = ContentService(db)
+        content = await content_svc.get_content_by_id(content_id)
+        if not content:
+            return ok({"items": []})
+        resolved_uuid = content.id
+        tmdb_id = getattr(content, 'tmdb_id', None)
+        title = getattr(content, 'title', None)
+        service = SocialService(db)
+        user_uuid = UUID(current_user_id) if current_user_id else None
+        items = await service.get_content_reviews(
+            content_id=resolved_uuid, 
+            limit=limit, 
+            offset=offset, 
+            current_user_id=user_uuid,
+            tmdb_id=tmdb_id,
+            title=title
+        )
+        return ok({"items": items})
+    except Exception as err:
+        logger.warning(f"Error fetching reviews for content {content_id}: {err}")
+        try:
+            await db.rollback()
+        except Exception: pass
+        return ok({"items": []})
+
 @router.get('/{id}', response_model=Dict[str, Any])
 async def get_review(
     id: UUID,
@@ -127,39 +163,4 @@ async def share_review(
     metadata = await service.share_review(UUID(user_id), id, req.conversation_id, req.recipient_id)
     return ok(metadata)
 
-
-@router.get('/content/{content_id}', response_model=Dict[str, Any])
-async def get_reviews_by_content(
-    content_id: str,
-    limit: int = 20,
-    offset: int = 0,
-    db: AsyncSession = Depends(get_db),
-    current_user_id: Optional[str] = Depends(get_current_user_id_optional)
-):
-    from app.services.content_service import ContentService
-    try:
-        # Resolve content_id (could be UUID or TMDB numeric ID)
-        content_svc = ContentService(db)
-        content = await content_svc.get_content_by_id(content_id)
-        if not content:
-            return ok({"items": []})
-        resolved_uuid = content.id
-        tmdb_id = getattr(content, 'tmdb_id', None)
-        title = getattr(content, 'title', None)
-        service = SocialService(db)
-        user_uuid = UUID(current_user_id) if current_user_id else None
-        items = await service.get_content_reviews(
-            content_id=resolved_uuid, 
-            limit=limit, 
-            offset=offset, 
-            current_user_id=user_uuid,
-            tmdb_id=tmdb_id,
-            title=title
-        )
-        return ok({"items": items})
-    except Exception as err:
-        logger.warning(f"Error fetching reviews for content {content_id}: {err}")
-        try:
-            await db.rollback()
-        except Exception: pass
-        return ok({"items": []})
+
