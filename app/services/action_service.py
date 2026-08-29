@@ -1164,7 +1164,8 @@ class ActionService:
                 
                 # Fallback to ceil(total/seasons) if no metadata
                 if s_total is None:
-                    s_total = math.ceil(row['total_episodes'] / total_seasons) if total_seasons > 0 else 0
+                    tot_eps = row['total_episodes'] or 0
+                    s_total = math.ceil(tot_eps / total_seasons) if (total_seasons > 0 and tot_eps > 0) else 0
                 
                 # Auto-complete season if progress >= total
                 if s_total > 0 and s_progress >= s_total and s_status != 'completed':

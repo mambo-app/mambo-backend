@@ -276,6 +276,19 @@ async def run_verification():
             import traceback
             traceback.print_exc()
 
+    # --- TEST 6: Recalculate Series Progression with Null Total Episodes ---
+    print("\n--- Running Test 6: Recalculate Progression with Null Total Episodes ---")
+    async with AsyncSessionLocal() as db:
+        try:
+            action_svc = ActionService(db)
+            print("Testing _recalculate_series_progression with null total_episodes...")
+            await action_svc._recalculate_series_progression(user_a_id, content_id)
+            print("Recalculate Series Progression executed cleanly with 0 errors!")
+        except Exception as e:
+            print(f"FAIL: Test 6 failed: {e}")
+            import traceback
+            traceback.print_exc()
+
     # --- CLEANUP ---
     print("\n--- Cleaning up test data ---")
     async with AsyncSessionLocal() as db:
