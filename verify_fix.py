@@ -243,6 +243,19 @@ async def run_verification():
             assert ucs_row2['status'] == 'dropped', "user_content_status should be 'dropped'"
             print("Status 'dropped' verified successfully!")
 
+            # 4. Test resuming a dropped show by watching episode 1
+            print("Testing watch_episode transition from 'dropped' -> 'watching'...")
+            res_watch = await action_svc.handle_action(
+                user_a_id,
+                content_id,
+                ContentActionRequest(action=ActionType.watch_episode, season_number=1, episode_number=1)
+            )
+            assert res_watch.status == 'success', f"watch_episode should return success, got {res_watch.status}"
+            ucs_res3 = await db.execute(text("SELECT status FROM user_content_status WHERE user_id = :uid AND content_id = :cid"), {'uid': user_a_id, 'cid': content_id})
+            ucs_row3 = ucs_res3.mappings().one()
+            assert ucs_row3['status'] == 'watching', f"user_content_status should transition to 'watching', got '{ucs_row3['status']}'"
+            print("Status transition 'dropped' -> 'watching' verified successfully!")
+
         except Exception as e:
             print(f"FAIL: Test 4 failed: {e}")
             import traceback

@@ -248,7 +248,7 @@ class ActionService:
                             last_watched_season = :sn,
                             last_watched_episode = :en,
                             status = CASE 
-                                        WHEN user_content_status.status IN ('none', 'plan_to_watch') THEN 'watching'
+                                        WHEN user_content_status.status IN ('none', 'plan_to_watch', 'on_hold', 'dropped') THEN 'watching'
                                         ELSE user_content_status.status
                                      END,
                             last_activity_at = now(),
