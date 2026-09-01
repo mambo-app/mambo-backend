@@ -416,7 +416,55 @@ class UserService:
                     COALESCE(CAST(c.id AS TEXT), '') as content_id,
                     COALESCE(CAST(al.review_id AS TEXT), CAST(r2.id AS TEXT)) as review_id,
                     CAST(al.post_id AS TEXT) as post_id,
-                    al.details,
+                    CASE 
+                        WHEN c.content_type IN ('series', 'anime', 'tv', 'tv_show') THEN
+                            COALESCE(al.details, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+                                'season', COALESCE(
+                                    CASE WHEN al.details->>'season' ~ '^[0-9]+$' THEN (al.details->>'season')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'season_number' ~ '^[0-9]+$' THEN (al.details->>'season_number')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'seasons_watched' ~ '^[0-9]+$' THEN (al.details->>'seasons_watched')::int ELSE NULL END,
+                                    ucs.last_watched_season
+                                ),
+                                'season_number', COALESCE(
+                                    CASE WHEN al.details->>'season' ~ '^[0-9]+$' THEN (al.details->>'season')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'season_number' ~ '^[0-9]+$' THEN (al.details->>'season_number')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'seasons_watched' ~ '^[0-9]+$' THEN (al.details->>'seasons_watched')::int ELSE NULL END,
+                                    ucs.last_watched_season
+                                ),
+                                'seasons_watched', COALESCE(
+                                    CASE WHEN al.details->>'season' ~ '^[0-9]+$' THEN (al.details->>'season')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'season_number' ~ '^[0-9]+$' THEN (al.details->>'season_number')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'seasons_watched' ~ '^[0-9]+$' THEN (al.details->>'seasons_watched')::int ELSE NULL END,
+                                    ucs.last_watched_season
+                                ),
+                                'episode', COALESCE(
+                                    CASE WHEN al.details->>'episode' ~ '^[0-9]+$' THEN (al.details->>'episode')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'episode_number' ~ '^[0-9]+$' THEN (al.details->>'episode_number')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'episodes_watched' ~ '^[0-9]+$' THEN (al.details->>'episodes_watched')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'progress_episodes' ~ '^[0-9]+$' THEN (al.details->>'progress_episodes')::int ELSE NULL END,
+                                    ucs.last_watched_episode,
+                                    ucs.progress_episodes
+                                ),
+                                'episode_number', COALESCE(
+                                    CASE WHEN al.details->>'episode' ~ '^[0-9]+$' THEN (al.details->>'episode')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'episode_number' ~ '^[0-9]+$' THEN (al.details->>'episode_number')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'episodes_watched' ~ '^[0-9]+$' THEN (al.details->>'episodes_watched')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'progress_episodes' ~ '^[0-9]+$' THEN (al.details->>'progress_episodes')::int ELSE NULL END,
+                                    ucs.last_watched_episode,
+                                    ucs.progress_episodes
+                                ),
+                                'episodes_watched', COALESCE(
+                                    CASE WHEN al.details->>'episode' ~ '^[0-9]+$' THEN (al.details->>'episode')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'episode_number' ~ '^[0-9]+$' THEN (al.details->>'episode_number')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'episodes_watched' ~ '^[0-9]+$' THEN (al.details->>'episodes_watched')::int ELSE NULL END,
+                                    CASE WHEN al.details->>'progress_episodes' ~ '^[0-9]+$' THEN (al.details->>'progress_episodes')::int ELSE NULL END,
+                                    ucs.last_watched_episode,
+                                    ucs.progress_episodes
+                                ),
+                                'start_episode', CASE WHEN al.details->>'start_episode' ~ '^[0-9]+$' THEN (al.details->>'start_episode')::int ELSE NULL END
+                            ))
+                        ELSE al.details
+                    END as details,
                     p.username as actor_username,
                     p.display_name as actor_display_name,
                     ucs.status as user_content_status,
