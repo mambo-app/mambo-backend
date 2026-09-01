@@ -467,7 +467,15 @@ class UserService:
                     NULL as post_id,
                     CASE 
                         WHEN c.content_type IN ('series', 'anime', 'tv', 'tv_show') AND ucs.last_watched_season IS NOT NULL THEN
-                            jsonb_build_object('season', ucs.last_watched_season, 'episode', COALESCE(ucs.last_watched_episode, 0))
+                            jsonb_build_object(
+                                'season', ucs.last_watched_season, 
+                                'season_number', ucs.last_watched_season, 
+                                'seasons_watched', ucs.last_watched_season,
+                                'episode', COALESCE(ucs.last_watched_episode, 0),
+                                'episode_number', COALESCE(ucs.last_watched_episode, 0),
+                                'episodes_watched', COALESCE(ucs.last_watched_episode, 0),
+                                'progress_episodes', COALESCE(ucs.progress_episodes, 0)
+                            )
                         ELSE NULL 
                     END as details,
                     :username as actor_username,
