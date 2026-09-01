@@ -842,8 +842,17 @@ class TMDBClient:
                 en_logo = next((l for l in logos if isinstance(l, dict) and l.get("iso_639_1") == "en"), logos[0])
                 if isinstance(en_logo, dict):
                     fp = en_logo.get("file_path")
-                    if fp: return f"{self.IMAGE_BASE}{fp}"
         return None
+
+    def _extract_backdrops(self, item: dict) -> list:
+        urls = []
+        if isinstance(item.get("images"), dict):
+            backdrops = item["images"].get("backdrops", [])
+            if isinstance(backdrops, list):
+                for b in backdrops[:15]:
+                    if isinstance(b, dict) and b.get("file_path"):
+                        urls.append(f"{self.BACKDROP_BASE}{b['file_path']}")
+        return urls
 
     def _normalize_movie(self, item: dict) -> dict:
         poster = item.get("poster_path")
@@ -885,6 +894,7 @@ class TMDBClient:
             "synopsis": item.get("overview"),
             "poster_url": f"{self.IMAGE_BASE}{poster}" if poster else None,
             "backdrop_url": f"{self.BACKDROP_BASE}{backdrop}" if backdrop else None,
+            "backdrops": self._extract_backdrops(item),
             "logo_url": logo_url,
             "title_logo": logo_url,
             "external_rating": item.get("vote_average"),
@@ -937,6 +947,7 @@ class TMDBClient:
             "synopsis": item.get("overview"),
             "poster_url": f"{self.IMAGE_BASE}{poster}" if poster else None,
             "backdrop_url": f"{self.BACKDROP_BASE}{backdrop}" if backdrop else None,
+            "backdrops": self._extract_backdrops(item),
             "logo_url": logo_url,
             "title_logo": logo_url,
             "external_rating": item.get("vote_average"),
