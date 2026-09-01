@@ -31,9 +31,8 @@ if settings.sentry_dsn:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start background news fetcher
+    # Startup initializations
     from app.services.chat_service import ChatService
-    from app.services.news_service import NewsService
     from app.core.database import AsyncSessionLocal
     import asyncio
     import logging
@@ -67,19 +66,6 @@ async def lifespan(app: FastAPI):
         async with AsyncSessionLocal() as db:
             await init_db_data_healing(db)
         logger.info("Global data healing task completed")
-
-    async def run_news_scheduler():
-        await asyncio.sleep(900)
-        while True:
-            try:
-                logger.info("Starting background news fetch cycle")
-                async with AsyncSessionLocal() as db:
-                    service = NewsService(db)
-                    await service.fetch_and_store_news(limit=5)
-                logger.info("News fetch cycle completed")
-            except Exception as e:
-                logger.error(f"News scheduler error: {e}")
-            await asyncio.sleep(6 * 3600)  # 6 hours
 
     async def run_content_cleanup_scheduler():
         await asyncio.sleep(600)  # Start 10 minutes after boot
@@ -134,12 +120,10 @@ async def lifespan(app: FastAPI):
     announced_task = asyncio.create_task(run_announced_sync_scheduler())
     if settings.app_env != 'development':
         logger.info(f"Starting background maintenance tasks in {settings.app_env} mode")
-        scheduler_task = asyncio.create_task(run_news_scheduler())
         cleanup_task = asyncio.create_task(run_content_cleanup_scheduler())
         healing_task = asyncio.create_task(run_global_healing())
     else:
         logger.info("Maintenance tasks are FORCED OFF for local development except Release Checker & Announced Sync")
-        scheduler_task = None
         cleanup_task = None
         healing_task = None
     
@@ -149,11 +133,10 @@ async def lifespan(app: FastAPI):
     try:
         if release_task: release_task.cancel()
         if announced_task: announced_task.cancel()
-        if scheduler_task: scheduler_task.cancel()
         if cleanup_task: cleanup_task.cancel()
         if healing_task: healing_task.cancel()
         await asyncio.gather(
-            *[t for t in [release_task, announced_task, scheduler_task, cleanup_task, healing_task] if t], 
+            *[t for t in [release_task, announced_task, cleanup_task, healing_task] if t], 
             return_exceptions=True
         )
     except Exception:
