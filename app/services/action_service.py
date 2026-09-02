@@ -1150,7 +1150,7 @@ class ActionService:
             user_map = {s['season_number']: s for s in user_statuses if s and s.get('season_number') is not None}
             
             has_tracked_seasons = False
-            all_tracked_completed = True
+            all_seasons_completed = True
             max_tracked_season = 0
             max_watched_episode = 0
             
@@ -1175,12 +1175,14 @@ class ActionService:
                     '''), {'uid': user_id, 'cid': content_id, 'sn': sn})
                     s_status = 'completed'
 
+                # Every season must be completed for overall series to be completed
+                if s_status != 'completed':
+                    all_seasons_completed = False
+
                 # If this season has been tracked by the user
                 if s_status not in ('none', None) or s_progress > 0:
                     has_tracked_seasons = True
                     max_tracked_season = max(max_tracked_season, sn)
-                    if s_status != 'completed':
-                        all_tracked_completed = False
                 
                 if s_progress > 0:
                     if sn == max_tracked_season:
@@ -1188,7 +1190,7 @@ class ActionService:
 
             # 2. Update main status
             if has_tracked_seasons:
-                if all_tracked_completed:
+                if all_seasons_completed:
                     # Check if it was ALREADY completed to avoid duplicate activity logs
                     status_check = await self.db.execute(text(
                         "SELECT status FROM user_content_status WHERE user_id = :uid AND content_id = :cid"
