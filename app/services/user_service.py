@@ -951,7 +951,10 @@ class UserService:
             # Ratings
             if w['rating'] is not None:
                 r = float(w['rating'])
-                r_5star = r / 2.0 if r > 5.0 else r
+                if r > 5.0 or r in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]:
+                    r_5star = r / 2.0
+                else:
+                    r_5star = r
                 all_user_ratings.append(r_5star)
                 idx = max(0, min(4, int(r_5star - 0.001)))
                 rating_counts[idx] += 1
