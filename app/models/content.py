@@ -53,6 +53,7 @@ class ContentResponse(BaseModel):
     original_language: Optional[str] = None
     poster_url: Optional[str] = None
     backdrop_url: Optional[str] = None
+    backdrops: List[str] = []
     logo_url: Optional[str] = None
     title_logo: Optional[str] = None
     genres: List[str] = []

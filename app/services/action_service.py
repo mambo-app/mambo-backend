@@ -1178,8 +1178,8 @@ class ActionService:
                     '''), {'uid': user_id, 'cid': content_id, 'sn': sn})
                     s_status = 'completed'
 
-                # If this season has been tracked by the user
-                if s_status not in ('none', None) or s_progress > 0:
+                # A season is tracked if it is completed or has watched episodes (> 0)
+                if s_status == 'completed' or s_progress > 0:
                     has_tracked_seasons = True
                     max_tracked_season = max(max_tracked_season, sn)
                     if s_status != 'completed':

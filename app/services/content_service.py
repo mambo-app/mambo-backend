@@ -2253,6 +2253,21 @@ class ContentService:
                     except Exception as s_sync_err:
                         logger.warning(f"Failed auto-syncing status/seasons for TMDB {d.get('tmdb_id')}: {s_sync_err}")
 
+            # Fetch TMDB backdrops gallery array
+            if d.get('tmdb_id'):
+                try:
+                    m_type = 'tv' if d.get('content_type') in ['series', 'anime', 'tv'] else 'movie'
+                    raw_tmdb = await self.tmdb_client.get_raw_details(d['tmdb_id'], m_type)
+                    if raw_tmdb:
+                        backdrops_list = self.tmdb_client._extract_backdrops(raw_tmdb)
+                        if backdrops_list:
+                            resp.backdrops = backdrops_list
+                except Exception as b_err:
+                    logger.warning(f"Failed fetching backdrops for TMDB {d.get('tmdb_id')}: {b_err}")
+
+            if not resp.backdrops and d.get('backdrop_url'):
+                resp.backdrops = [d['backdrop_url']]
+
             # 5. Fetch user status if user_id is provided
             if user_id:
                 try:
