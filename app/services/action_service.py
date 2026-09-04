@@ -224,10 +224,13 @@ class ActionService:
                     WHERE user_id = :uid AND content_id = :cid AND season_number = :sn
                 '''), {'uid': user_id, 'cid': content_id, 'sn': req.season_number})
                 prev_row = prev_res.mappings().one_or_none()
-                old_progress = prev_row.get('progress_episodes') if prev_row else 0
+                old_progress = prev_row.get('progress_episodes') if (prev_row and prev_row.get('progress_episodes') is not None) else 0
 
                 # 1. Log episode watch (and intermediate ones if any)
-                start_ep = old_progress + 1 if old_progress is not None and old_progress < req.episode_number else req.episode_number
+                if old_progress < req.episode_number:
+                    start_ep = old_progress + 1
+                else:
+                    start_ep = req.episode_number
                 for ep in range(start_ep, req.episode_number + 1):
                     await self.db.execute(text('''
                         INSERT INTO episode_watch_history (user_id, content_id, season_number, episode_number)
