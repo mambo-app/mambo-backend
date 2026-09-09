@@ -351,14 +351,14 @@ class SocialService:
             raise HTTPException(status_code=400, detail="Review text is mandatory. Use 'Rate' for star-only ratings.")
 
         # Check if the latest watch session is unreviewed
+        # Check if there is a recent unreviewed watch session (within 12 hours)
         session_res = await self.db.execute(text('''
-            SELECT id, review_id FROM watch_history 
+            SELECT id, review_id, watched_at FROM watch_history 
             WHERE user_id = :uid AND content_id = :cid 
             ORDER BY watched_at DESC LIMIT 1
         '''), {'uid': user_id, 'cid': content_id})
         latest_session = session_res.mappings().one_or_none()
 
-        # 2. Find the most recent watch session to link (ONLY if unreviewed)
         from app.services.action_service import ActionService
         from app.models.action import ActionType
         action_svc = ActionService(self.db)
@@ -377,8 +377,16 @@ class SocialService:
         status_row = status_res.mappings().one_or_none() or {}
         is_watched = status_row.get('is_watched') or False
 
-        # Only use latest session if it doesn't already have a review attached!
-        unreviewed_session = latest_session if (latest_session and latest_session.get('review_id') is None) else None
+        from datetime import datetime, timezone
+        unreviewed_session = None
+        if latest_session and latest_session.get('review_id') is None:
+            w_time = latest_session.get('watched_at')
+            if w_time:
+                now_utc = datetime.now(timezone.utc)
+                if w_time.tzinfo is None:
+                    w_time = w_time.replace(tzinfo=timezone.utc)
+                if (now_utc - w_time).total_seconds() < 43200:
+                    unreviewed_session = latest_session
 
         watch_history_id = None
         if unreviewed_session:
@@ -403,7 +411,8 @@ class SocialService:
         else:
             # Create a NEW watch history session for this review
             if content_type == 'movie':
-                watch_history_id = await action_svc._handle_watch(user_id, content_id, ActionType.watch)
+                act = ActionType.rewatch if is_watched else ActionType.watch
+                watch_history_id = await action_svc._handle_watch(user_id, content_id, act)
             else:
                 import uuid as _uuid
                 wh_res = await self.db.execute(text('''

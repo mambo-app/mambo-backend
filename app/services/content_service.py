@@ -232,7 +232,7 @@ class ContentService:
             logger.warning(f"TMDB movies trending fetch timeout: {net_m}")
 
         try:
-            s_raw = await asyncio.wait_for(self.tmdb_client.get_trending_series(page=1), timeout=4.0)
+            s_raw = await asyncio.wait_for(self.tmdb_client.get_trending_series(page=1), timeout=8.0)
             if isinstance(s_raw, list) and s_raw:
                 s_list = [s for s in s_raw if s.get("content_type") != "anime" and _is_valid_trending(s)][:20]
         except Exception as net_s:

@@ -86,15 +86,10 @@ class ReviewService:
                 WHERE user_id = :uid AND content_id = :cid
             '''), {'uid': actual_user_id, 'cid': content_id})
             
-            # Clean up review_only watch history entries
+            # Clean up activity log rows for ONLY this specific review
             await self.db.execute(text('''
-                DELETE FROM watch_history WHERE user_id = :uid AND content_id = :cid AND watch_type = 'review_only'
-            '''), {'uid': actual_user_id, 'cid': content_id})
-
-            # Clean up activity log rows for this review/rating
-            await self.db.execute(text('''
-                DELETE FROM activity_log WHERE review_id = :rid OR (user_id = :uid AND content_id = :cid AND activity_type IN ('reviewed', 'rated', 'watched', 'updated_review'))
-            '''), {'rid': r_uuid, 'uid': actual_user_id, 'cid': content_id})
+                DELETE FROM activity_log WHERE review_id = :rid
+            '''), {'rid': r_uuid})
 
         # Update stats
         await self.db.execute(text('''

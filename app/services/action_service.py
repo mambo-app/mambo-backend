@@ -905,10 +905,10 @@ class ActionService:
         wid = deleted_row['id']
         rid = deleted_row['review_id']
 
-        # 2. Clear review link if present
+        # 2. Delete attached review if present
         if rid:
             await self.db.execute(text('''
-                UPDATE reviews SET watch_history_id = NULL WHERE id = :rid
+                DELETE FROM reviews WHERE id = :rid
             '''), {'rid': rid})
 
         # 3. Delete activity log entry for this specific watch history ID

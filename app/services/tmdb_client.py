@@ -92,7 +92,7 @@ class TMDBClient:
                 resp = await client.get(
                     f"{self.BASE_URL}/trending/tv/day",
                     params={"api_key": self.api_key, "language": "en-US", "page": page},
-                    timeout=10.0
+                    timeout=8.0
                 )
                 resp.raise_for_status()
                 data = resp.json().get("results", [])
