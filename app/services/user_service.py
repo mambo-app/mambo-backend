@@ -1090,17 +1090,11 @@ class UserService:
         from app.repositories.user_repo import UserRepository
         repo = UserRepository(self.db)
         
-        # Handle @ prefix for specific username matching
-        if query.startswith('@'):
-            prefix = query[1:].strip()
-            if not prefix:
-                # Return suggested users if only '@' is typed
-                return await repo.get_trending_creators(limit=6, viewer_id=viewer_id)
-            # Use specific username prefix search
-            return await repo.search_by_username_prefix(prefix, limit)
+        clean_q = query.strip().lstrip('@')
+        if not clean_q:
+            return await repo.get_trending_creators(limit=6, viewer_id=viewer_id)
             
-        # Default full-text search
-        return await repo.search(query, limit, 0)
+        return await repo.search(clean_q, limit, 0)
 
     async def toggle_person_favorite(self, user_id: str, person_id: str, name: str, profile_url: Optional[str], is_actor: bool) -> bool:
         from app.repositories.user_repo import UserRepository

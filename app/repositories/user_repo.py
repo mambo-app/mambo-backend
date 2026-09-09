@@ -74,24 +74,33 @@ class UserRepository(BaseRepository):
         ''', fields)
 
     async def search(self, query: str, limit: int, offset: int) -> list[dict]:
+        clean_q = query.strip().lstrip('@')
+        like_p = f"{clean_q}%"
         return await self.fetch_many('''
             SELECT id, username, display_name, avatar_url, is_verified
             FROM profiles
-            WHERE search_vector @@ plainto_tsquery('simple', :query)
+            WHERE (
+                username ILIKE :like_p 
+                OR display_name ILIKE :like_p
+                OR search_vector @@ plainto_tsquery('simple', :query)
+            )
             AND is_deleted = false
-            ORDER BY ts_rank(search_vector, plainto_tsquery('simple', :query)) DESC
+            ORDER BY 
+                CASE WHEN username ILIKE :like_p THEN 0 ELSE 1 END,
+                username ASC
             LIMIT :limit OFFSET :offset
-        ''', {'query': query, 'limit': limit, 'offset': offset})
+        ''', {'query': clean_q, 'like_p': like_p, 'limit': limit, 'offset': offset})
 
     async def search_by_username_prefix(self, prefix: str, limit: int) -> list[dict]:
+        clean_p = prefix.strip().lstrip('@')
         return await self.fetch_many('''
             SELECT id, username, display_name, avatar_url, is_verified
             FROM profiles
-            WHERE username ILIKE :prefix
+            WHERE (username ILIKE :prefix OR display_name ILIKE :prefix)
             AND is_deleted = false
             ORDER BY username ASC
             LIMIT :limit
-        ''', {'prefix': f'{prefix}%', 'limit': limit})
+        ''', {'prefix': f'{clean_p}%', 'limit': limit})
 
     async def follow(self, follower_id: str, following_id: str) -> None:
         # 1. Insert follow relationship

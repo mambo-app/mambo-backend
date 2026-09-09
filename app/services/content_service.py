@@ -1749,11 +1749,17 @@ class ContentService:
                 import asyncio
                 remote_results = []
                 if ct == 'movie':
-                    remote_results = await asyncio.wait_for(self.tmdb_client.search_movies(clean_q), timeout=3.5)
+                    remote_results = await asyncio.wait_for(self.tmdb_client.search_movies(clean_q), timeout=4.5)
                 elif ct == 'series':
-                    remote_results = await asyncio.wait_for(self.tmdb_client.search_series(clean_q), timeout=3.5)
+                    remote_results = await asyncio.wait_for(self.tmdb_client.search_series(clean_q), timeout=4.5)
                 elif ct == 'anime':
-                    remote_results = await asyncio.wait_for(self.mal_client.search_anime(clean_q), timeout=3.5)
+                    try:
+                        remote_results = await asyncio.wait_for(self.mal_client.search_anime(clean_q), timeout=6.0)
+                    except Exception:
+                        remote_results = []
+                    if not remote_results:
+                        raw_s = await self.tmdb_client.search_series(clean_q)
+                        remote_results = [s for s in raw_s if 16 in s.get('genre_ids', []) or s.get('original_language') == 'ja' or s.get('content_type') == 'anime']
                 elif not ct:
                     res_m, res_s, res_a = await asyncio.wait_for(
                         asyncio.gather(
@@ -1762,7 +1768,7 @@ class ContentService:
                             self.mal_client.search_anime(clean_q),
                             return_exceptions=True
                         ),
-                        timeout=3.5
+                        timeout=6.0
                     )
                     tm_m = res_m if isinstance(res_m, list) else []
                     tm_s = res_s if isinstance(res_s, list) else []
@@ -1770,19 +1776,17 @@ class ContentService:
                     remote_results = tm_m + tm_s + ma_a
                 
                 if remote_results:
-                    t_res = [r for r in remote_results if r.get('content_type') != 'anime']
-                    a_res = [r for r in remote_results if r.get('content_type') == 'anime']
-                    
-                    try:
-                        if t_res: await self._upsert_tmdb_content(t_res, returning=False)
-                        if a_res: await self._upsert_mal_content(a_res, returning=False)
-                    except Exception as upsert_err:
-                        logger.warning(f"Search background upsert warning: {upsert_err}")
-                        try: await self.db.rollback()
-                        except Exception: pass
-                    
-                    # Re-run smart local search after upserting live TMDB/MAL items
-                    rows = await _execute_smart_local_search()
+                    existing_keys = {
+                        f"tmdb_{r.get('tmdb_id')}" if r.get('tmdb_id') else f"{r.get('title','').strip().lower()}_{r.get('content_type')}"
+                        for r in rows
+                    }
+                    for r in remote_results:
+                        tid = r.get('tmdb_id') or r.get('id')
+                        mid = r.get('mal_id')
+                        key = f"tmdb_{tid}" if tid else (f"mal_{mid}" if mid else f"{r.get('title','').strip().lower()}_{r.get('content_type')}")
+                        if key not in existing_keys:
+                            rows.append(r)
+                            existing_keys.add(key)
             except Exception as e:
                 logger.error(f"Remote search fallback failed: {e}")
 
