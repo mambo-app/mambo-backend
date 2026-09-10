@@ -1,10 +1,10 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Union
 from datetime import datetime
 from uuid import UUID
 
 class ReviewCreateRequest(BaseModel):
-    content_id: UUID
+    content_id: Union[UUID, str]
     star_rating: Optional[float] = Field(None, ge=1, le=10)
     text_review: Optional[str] = None
     contains_spoiler: bool = False

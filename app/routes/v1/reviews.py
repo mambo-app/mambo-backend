@@ -86,10 +86,17 @@ async def create_review(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id)
 ):
+    from app.services.content_service import ContentService
+    content_svc = ContentService(db)
+    content = await content_svc.get_content_by_id(str(req.content_id), user_id)
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+    resolved_content_id = content.id
+
     service = SocialService(db)
     result = await service.create_review(
         user_id=UUID(user_id),
-        content_id=req.content_id,
+        content_id=resolved_content_id,
         star_rating=req.star_rating,
         text_review=req.text_review,
         contains_spoiler=req.contains_spoiler,
