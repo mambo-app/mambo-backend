@@ -15,6 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from app.core.config import settings
 
+try:
+    from curl_cffi import requests as curl_requests
+except ImportError:
+    curl_requests = None
+
 logger = logging.getLogger('mambo.letterboxd_service')
 
 # Global progress tracker: user_id -> {"processed": int, "total": int, "status": str}
@@ -40,6 +45,8 @@ class LetterboxdService:
             "Accept-Language": "en-US,en;q=0.9",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
+
+        # Stage 1: ScraperAPI
         scraper_key = getattr(settings, 'scraperapi_key', None) or os.getenv("SCRAPERAPI_KEY")
         if scraper_key:
             import requests
@@ -47,14 +54,53 @@ class LetterboxdService:
                 params = {"api_key": scraper_key, "url": url, "keep_headers": "true", "render": "false"}
                 resp = requests.get("https://api.scraperapi.com", params=params, headers=headers, timeout=timeout)
                 if resp.status_code == 200 and resp.text:
+                    logger.info(f"Scrape succeeded via ScraperAPI for {url}")
                     return resp.text
             except Exception as e:
                 logger.warning(f"ScraperAPI fetch failed for {url}: {e}")
 
+        # Stage 2: ScrapingAnt
+        scrapingant_key = getattr(settings, 'scrapingant_key', None) or os.getenv("SCRAPINGANT_KEY")
+        if scrapingant_key:
+            import requests
+            try:
+                params = {"x-api-key": scrapingant_key, "url": url}
+                resp = requests.get("https://api.scrapingant.com/v2/general", params=params, timeout=timeout)
+                if resp.status_code == 200 and resp.text:
+                    logger.info(f"Scrape succeeded via ScrapingAnt for {url}")
+                    return resp.text
+            except Exception as e:
+                logger.warning(f"ScrapingAnt fetch failed for {url}: {e}")
+
+        # Stage 3: ZenRows
+        zenrows_key = getattr(settings, 'zenrows_key', None) or os.getenv("ZENROWS_KEY")
+        if zenrows_key:
+            import requests
+            try:
+                params = {"api_key": zenrows_key, "url": url}
+                resp = requests.get("https://api.zenrows.com/v1/", params=params, timeout=timeout)
+                if resp.status_code == 200 and resp.text:
+                    logger.info(f"Scrape succeeded via ZenRows for {url}")
+                    return resp.text
+            except Exception as e:
+                logger.warning(f"ZenRows fetch failed for {url}: {e}")
+
+        # Stage 4: curl_cffi (impersonate browser TLS fingerprint)
+        if curl_requests:
+            try:
+                resp = curl_requests.get(url, impersonate="chrome124", headers=headers, timeout=timeout)
+                if resp.status_code == 200 and resp.text:
+                    logger.info(f"Scrape succeeded via curl_cffi for {url}")
+                    return resp.text
+            except Exception as e:
+                logger.warning(f"curl_cffi fetch failed for {url}: {e}")
+
+        # Stage 5: cloudscraper / direct requests fallback
         try:
             scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
             resp = scraper.get(url, headers=headers, timeout=timeout)
             if resp.status_code == 200 and resp.text:
+                logger.info(f"Scrape succeeded via cloudscraper for {url}")
                 return resp.text
         except Exception:
             pass
