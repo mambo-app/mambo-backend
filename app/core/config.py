@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     tmdb_api_key: str = ''
     mal_client_id: str = ''
     scraperapi_key: str = 'f6fefc5783fc51458243cdb91c4d8f9d'
+    scrapingant_key: str = 'ce09e12e06384335aea0ab70884cbf42'
+    zenrows_key: str = '192389eb42b9fd5f794a6e5a56d8a0eec20af134'
     news_api: str = ''
     app_env: str = 'development'
     invite_key: str = 'B3G1N'

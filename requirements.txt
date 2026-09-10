@@ -19,3 +19,4 @@ upstash-redis
 redis
 beautifulsoup4
 cloudscraper
+curl-cffi

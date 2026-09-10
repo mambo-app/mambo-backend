@@ -339,6 +339,7 @@ class SocialService:
         tagged_seasons: list[int] | None = None,
         tagged_episodes: list[int] | None = None,
         review_type: str = "overall",
+        watch_history_id: UUID | None = None,
         **kwargs
     ) -> dict:
         # 0. Guarantee content row exists in PostgreSQL content table
@@ -388,9 +389,9 @@ class SocialService:
                 if (now_utc - w_time).total_seconds() < 43200:
                     unreviewed_session = latest_session
 
-        watch_history_id = None
-        if unreviewed_session:
-            watch_history_id = unreviewed_session['id']
+        target_wh_id = watch_history_id or (unreviewed_session['id'] if unreviewed_session else None)
+        if target_wh_id:
+            watch_history_id = target_wh_id
             # Update the rating for this session to match the review
             await self.db.execute(text('''
                 UPDATE watch_history SET rating = :r WHERE id = :wid

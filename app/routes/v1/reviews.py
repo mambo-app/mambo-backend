@@ -96,7 +96,8 @@ async def create_review(
         tags=req.tags,
         tagged_seasons=req.tagged_seasons,
         tagged_episodes=req.tagged_episodes,
-        review_type=req.review_type
+        review_type=req.review_type,
+        watch_history_id=req.watch_history_id
     )
     return ok(result)
 
