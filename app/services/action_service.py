@@ -930,6 +930,11 @@ class ActionService:
                 WHERE user_id = :uid AND content_id = :cid
             '''), {'uid': user_id, 'cid': content_id})
             await self._remove_from_collection(user_id, content_id, 'Watched')
+            await self.db.execute(text('''
+                DELETE FROM activity_log
+                WHERE user_id = :uid AND content_id = :cid
+                  AND activity_type IN ('watched', 'rewatched', 'rated', 'reviewed', 'updated_review', 'updated_rating')
+            '''), {'uid': user_id, 'cid': content_id})
         else:
             # Fetch latest watched_at and latest rating
             latest_res = await self.db.execute(text('''
