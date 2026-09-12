@@ -197,10 +197,16 @@ class ContentService:
 
     async def get_home_trending(self, user_id: Optional[str] = None) -> HomeTrendingResponse:
         cache_key = f"v600:daily_trending_spotlight:{date.today().isoformat()}"
+        fallback_cache_key = "v600:daily_trending_spotlight:latest_valid"
+
+        # 1. Check today's cache (MUST have >= 5 items in ALL categories to be considered valid)
         try:
             cached = await cache.get(cache_key)
-            if cached:
-                if cached.get('movies') or cached.get('series') or cached.get('anime'):
+            if cached and isinstance(cached, dict):
+                m_c = cached.get('movies') or []
+                s_c = cached.get('series') or []
+                a_c = cached.get('anime') or []
+                if len(m_c) >= 5 and len(s_c) >= 5 and len(a_c) >= 5:
                     resp = HomeTrendingResponse.model_validate(cached)
                     if user_id:
                         all_items = resp.movies + resp.series + resp.anime
@@ -212,6 +218,10 @@ class ContentService:
         today = date.today()
 
         def _is_valid_trending(item: dict) -> bool:
+            if not isinstance(item, dict):
+                return False
+            if not (item.get('poster_url') or item.get('poster_path') or item.get('image_url')):
+                return False
             rd = item.get('release_date') or item.get('first_air_date')
             if rd:
                 if isinstance(rd, str):
@@ -223,58 +233,76 @@ class ContentService:
                 return False
             return True
 
-        # 1. Fetch live daily trending items with generous 4-second timeout
+        # 2. Parallel Live Fetch from TMDB & MAL with generous 6.0s timeout
         try:
-            m_raw = await asyncio.wait_for(self.tmdb_client.get_trending_movies(page=1), timeout=4.0)
-            if isinstance(m_raw, list) and m_raw:
+            m_raw, s_raw, a_raw = await asyncio.gather(
+                asyncio.wait_for(self.tmdb_client.get_trending_movies(page=1), timeout=6.0),
+                asyncio.wait_for(self.tmdb_client.get_trending_series(page=1), timeout=6.0),
+                asyncio.wait_for(self.mal_client.get_trending_anime(), timeout=6.0),
+                return_exceptions=True
+            )
+            if isinstance(m_raw, list):
                 m_list = [m for m in m_raw if _is_valid_trending(m)][:20]
-        except Exception as net_m:
-            logger.warning(f"TMDB movies trending fetch timeout: {net_m}")
-
-        try:
-            s_raw = await asyncio.wait_for(self.tmdb_client.get_trending_series(page=1), timeout=8.0)
-            if isinstance(s_raw, list) and s_raw:
+            if isinstance(s_raw, list):
                 s_list = [s for s in s_raw if s.get("content_type") != "anime" and _is_valid_trending(s)][:20]
-        except Exception as net_s:
-            logger.warning(f"TMDB series trending fetch timeout: {net_s}")
-
-        try:
-            a_task = asyncio.create_task(self.mal_client.get_trending_anime())
-            a_raw = await asyncio.wait_for(a_task, timeout=3.0)
-            if isinstance(a_raw, list) and a_raw:
+            if isinstance(a_raw, list):
                 a_list = [a for a in a_raw if _is_valid_trending(a)][:20]
-        except Exception as net_a:
-            logger.warning(f"MAL anime trending fetch timeout/skipped: {net_a}")
+        except Exception as net_err:
+            logger.warning(f"Home trending live fetch error/timeout: {net_err}")
 
-        # 2. Local DB query ordered strictly by trending_score / popularity DESC
+        # 3. Local DB Query Fallback for any category with < 5 items
         try:
-            if not m_list:
+            if len(m_list) < 5:
                 m_res = await self.db.execute(text("""
                     SELECT * FROM content WHERE content_type = 'movie' 
+                    AND poster_url IS NOT NULL AND poster_url != ''
                     AND (release_date IS NULL OR release_date <= CURRENT_DATE)
-                    ORDER BY trending_score DESC NULLS LAST, popularity DESC NULLS LAST, vote_count DESC NULLS LAST, external_rating DESC NULLS LAST LIMIT 20
+                    ORDER BY trending_score DESC NULLS LAST, popularity DESC NULLS LAST, vote_count DESC NULLS LAST LIMIT 20
                 """))
-                m_list = [dict(r) for r in m_res.mappings()]
+                m_db = [dict(r) for r in m_res.mappings()]
+                if m_db:
+                    m_list = m_db
 
-            if not s_list:
+            if len(s_list) < 5:
                 s_res = await self.db.execute(text("""
                     SELECT * FROM content WHERE content_type = 'series' 
+                    AND poster_url IS NOT NULL AND poster_url != ''
                     AND (release_date IS NULL OR release_date <= CURRENT_DATE)
-                    ORDER BY trending_score DESC NULLS LAST, popularity DESC NULLS LAST, vote_count DESC NULLS LAST, external_rating DESC NULLS LAST LIMIT 20
+                    ORDER BY trending_score DESC NULLS LAST, popularity DESC NULLS LAST, vote_count DESC NULLS LAST LIMIT 20
                 """))
-                s_list = [dict(r) for r in s_res.mappings()]
+                s_db = [dict(r) for r in s_res.mappings()]
+                if s_db:
+                    s_list = s_db
 
-            if not a_list:
+            if len(a_list) < 5:
                 a_res = await self.db.execute(text("""
                     SELECT * FROM content WHERE content_type = 'anime' 
+                    AND poster_url IS NOT NULL AND poster_url != ''
                     AND (release_date IS NULL OR release_date <= CURRENT_DATE)
-                    ORDER BY trending_score DESC NULLS LAST, popularity DESC NULLS LAST, vote_count DESC NULLS LAST, external_rating DESC NULLS LAST LIMIT 20
+                    ORDER BY trending_score DESC NULLS LAST, popularity DESC NULLS LAST, vote_count DESC NULLS LAST LIMIT 20
                 """))
-                a_list = [dict(r) for r in a_res.mappings()]
+                a_db = [dict(r) for r in a_res.mappings()]
+                if a_db:
+                    a_list = a_db
         except Exception as db_e:
             logger.warning(f"Home trending local DB query error: {db_e}")
+            try: await self.db.rollback()
+            except Exception: pass
 
-        # 2. Async background refresh for live trending items (non-blocking)
+        # 4. Fallback Cache (latest_valid) if any category is STILL empty
+        try:
+            if len(m_list) < 5 or len(s_list) < 5 or len(a_list) < 5:
+                latest_cached = await cache.get(fallback_cache_key)
+                if latest_cached and isinstance(latest_cached, dict):
+                    if len(m_list) < 5 and (latest_cached.get('movies')):
+                        m_list = latest_cached['movies']
+                    if len(s_list) < 5 and (latest_cached.get('series')):
+                        s_list = latest_cached['series']
+                    if len(a_list) < 5 and (latest_cached.get('anime')):
+                        a_list = latest_cached['anime']
+        except Exception: pass
+
+        # 5. Async background refresh to ensure DB gets latest live items
         async def _refresh_live_trending():
             try:
                 m_raw, s_raw, a_raw = await asyncio.gather(
@@ -294,44 +322,6 @@ class ContentService:
 
         asyncio.create_task(_refresh_live_trending())
 
-        # 2. DB Fallback (filtered by released items & vote count)
-        try:
-            if not m_list:
-                res = await self.db.execute(text("""
-                    SELECT * FROM content 
-                    WHERE content_type = 'movie' 
-                      AND (release_date IS NULL OR release_date <= CURRENT_DATE)
-                    ORDER BY release_date DESC NULLS LAST, vote_count DESC NULLS LAST 
-                    LIMIT 20
-                """))
-                m_list = [dict(r) for r in res.mappings()]
-
-            if not s_list:
-                res = await self.db.execute(text("""
-                    SELECT * FROM content 
-                    WHERE content_type = 'series' 
-                      AND (release_date IS NULL OR release_date <= CURRENT_DATE)
-                    ORDER BY release_date DESC NULLS LAST, vote_count DESC NULLS LAST 
-                    LIMIT 20
-                """))
-                s_list = [dict(r) for r in res.mappings()]
-
-            if not a_list:
-                res = await self.db.execute(text("""
-                    SELECT * FROM content 
-                    WHERE content_type = 'anime' 
-                      AND (release_date IS NULL OR release_date <= CURRENT_DATE)
-                    ORDER BY release_date DESC NULLS LAST, vote_count DESC NULLS LAST 
-                    LIMIT 20
-                """))
-                a_list = [dict(r) for r in res.mappings()]
-        except Exception as db_err:
-            logger.error(f"DB fallback query error in get_home_trending: {db_err}")
-            try:
-                await self.db.rollback()
-            except Exception:
-                pass
-
         all_items = m_list + s_list + a_list
         if user_id:
             await self._populate_user_status(all_items, user_id)
@@ -344,9 +334,14 @@ class ContentService:
             series=self._map_to_response(s_list),
             anime=self._map_to_response(a_list)
         )
+
+        # 6. Only cache if ALL THREE categories have >= 5 valid items
         try:
-            await cache.set(cache_key, resp.model_dump(), ttl=CacheService.TTL_TRENDING)
+            if len(resp.movies) >= 5 and len(resp.series) >= 5 and len(resp.anime) >= 5:
+                await cache.set(cache_key, resp.model_dump(), ttl=CacheService.TTL_TRENDING)
+                await cache.set(fallback_cache_key, resp.model_dump(), ttl=86400 * 30) # 30-day persistent backup
         except Exception: pass
+
         return resp
 
     async def get_continue_watching(self, user_id: str) -> List[Dict[str, Any]]:
