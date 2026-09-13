@@ -39,7 +39,7 @@ class LetterboxdService:
             count += 0.5
         return count if count > 0 else None
 
-    def _fetch_url(self, url: str, timeout: int = 15) -> Optional[str]:
+    def _fetch_url(self, url: str, timeout: int = 12) -> Optional[str]:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
@@ -56,46 +56,7 @@ class LetterboxdService:
             except Exception as e:
                 logger.warning(f"curl_cffi fetch failed for {url}: {e}")
 
-        # Stage 2: ScraperAPI
-        scraper_key = getattr(settings, 'scraperapi_key', None) or os.getenv("SCRAPERAPI_KEY")
-        if scraper_key:
-            import requests
-            try:
-                params = {"api_key": scraper_key, "url": url, "keep_headers": "true", "render": "false"}
-                resp = requests.get("https://api.scraperapi.com", params=params, headers=headers, timeout=min(timeout, 10))
-                if resp.status_code == 200 and resp.text:
-                    logger.info(f"Scrape succeeded via ScraperAPI for {url}")
-                    return resp.text
-            except Exception as e:
-                logger.warning(f"ScraperAPI fetch failed for {url}: {e}")
-
-        # Stage 3: ScrapingAnt
-        scrapingant_key = getattr(settings, 'scrapingant_key', None) or os.getenv("SCRAPINGANT_KEY")
-        if scrapingant_key:
-            import requests
-            try:
-                params = {"x-api-key": scrapingant_key, "url": url}
-                resp = requests.get("https://api.scrapingant.com/v2/general", params=params, timeout=min(timeout, 10))
-                if resp.status_code == 200 and resp.text:
-                    logger.info(f"Scrape succeeded via ScrapingAnt for {url}")
-                    return resp.text
-            except Exception as e:
-                logger.warning(f"ScrapingAnt fetch failed for {url}: {e}")
-
-        # Stage 4: ZenRows
-        zenrows_key = getattr(settings, 'zenrows_key', None) or os.getenv("ZENROWS_KEY")
-        if zenrows_key:
-            import requests
-            try:
-                params = {"api_key": zenrows_key, "url": url}
-                resp = requests.get("https://api.zenrows.com/v1/", params=params, timeout=min(timeout, 10))
-                if resp.status_code == 200 and resp.text:
-                    logger.info(f"Scrape succeeded via ZenRows for {url}")
-                    return resp.text
-            except Exception as e:
-                logger.warning(f"ZenRows fetch failed for {url}: {e}")
-
-        # Stage 5: cloudscraper / direct requests fallback
+        # Stage 2: cloudscraper (Fast local Cloudflare solver)
         try:
             scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
             resp = scraper.get(url, headers=headers, timeout=timeout)
@@ -105,6 +66,46 @@ class LetterboxdService:
         except Exception:
             pass
 
+        # Stage 3: ScraperAPI
+        scraper_key = getattr(settings, 'scraperapi_key', None) or os.getenv("SCRAPERAPI_KEY")
+        if scraper_key:
+            import requests
+            try:
+                params = {"api_key": scraper_key, "url": url, "keep_headers": "true", "render": "false"}
+                resp = requests.get("https://api.scraperapi.com", params=params, headers=headers, timeout=5)
+                if resp.status_code == 200 and resp.text:
+                    logger.info(f"Scrape succeeded via ScraperAPI for {url}")
+                    return resp.text
+            except Exception as e:
+                logger.warning(f"ScraperAPI fetch failed for {url}: {e}")
+
+        # Stage 4: ScrapingAnt
+        scrapingant_key = getattr(settings, 'scrapingant_key', None) or os.getenv("SCRAPINGANT_KEY")
+        if scrapingant_key:
+            import requests
+            try:
+                params = {"x-api-key": scrapingant_key, "url": url}
+                resp = requests.get("https://api.scrapingant.com/v2/general", params=params, timeout=5)
+                if resp.status_code == 200 and resp.text:
+                    logger.info(f"Scrape succeeded via ScrapingAnt for {url}")
+                    return resp.text
+            except Exception as e:
+                logger.warning(f"ScrapingAnt fetch failed for {url}: {e}")
+
+        # Stage 5: ZenRows
+        zenrows_key = getattr(settings, 'zenrows_key', None) or os.getenv("ZENROWS_KEY")
+        if zenrows_key:
+            import requests
+            try:
+                params = {"api_key": zenrows_key, "url": url}
+                resp = requests.get("https://api.zenrows.com/v1/", params=params, timeout=5)
+                if resp.status_code == 200 and resp.text:
+                    logger.info(f"Scrape succeeded via ZenRows for {url}")
+                    return resp.text
+            except Exception as e:
+                logger.warning(f"ZenRows fetch failed for {url}: {e}")
+
+        # Stage 6: Direct requests
         import requests
         try:
             resp = requests.get(url, headers=headers, timeout=timeout)
@@ -1111,6 +1112,7 @@ class LetterboxdService:
                 # Fetch Reviews (all pages)
                 check_cancelled()
                 sync_progress[user_id]["current_item"] = "Fetching reviews..."
+                reviews = []
                 p = 1
                 while True:
                     check_cancelled()
