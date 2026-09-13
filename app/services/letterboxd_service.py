@@ -49,7 +49,7 @@ class LetterboxdService:
         # Stage 1: curl_cffi (impersonate browser TLS fingerprint - fastest & most reliable)
         if curl_requests:
             try:
-                resp = curl_requests.get(url, impersonate="chrome124", headers=headers, timeout=timeout)
+                resp = curl_requests.get(url, impersonate="chrome124", headers=headers, timeout=timeout, allow_redirects=True)
                 if resp.status_code == 200 and resp.text:
                     logger.info(f"Scrape succeeded via curl_cffi for {url}")
                     return resp.text
@@ -1000,6 +1000,7 @@ class LetterboxdService:
                 check_cancelled()
                 sync_progress[user_id]["current_item"] = "Fetching watched films list..."
                 films = []
+                reviews = []
                 for p in range(1, 25): # fetch up to 25 pages (~1800 items)
                     check_cancelled()
                     try:
@@ -1112,7 +1113,6 @@ class LetterboxdService:
                 # Fetch Reviews (all pages)
                 check_cancelled()
                 sync_progress[user_id]["current_item"] = "Fetching reviews..."
-                reviews = []
                 p = 1
                 while True:
                     check_cancelled()
