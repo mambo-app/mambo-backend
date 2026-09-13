@@ -39,7 +39,7 @@ class LetterboxdService:
             count += 0.5
         return count if count > 0 else None
 
-    def _fetch_url(self, url: str, timeout: int = 12) -> Optional[str]:
+    def _fetch_url(self, url: str, timeout: int = 20) -> Optional[str]:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
@@ -50,7 +50,7 @@ class LetterboxdService:
         if curl_requests:
             try:
                 resp = curl_requests.get(url, impersonate="chrome124", headers=headers, timeout=timeout, allow_redirects=True)
-                if resp.status_code == 200 and resp.text:
+                if resp.status_code == 200 and resp.text and "<title>Notice</title>" not in resp.text and "Just a moment..." not in resp.text:
                     logger.info(f"Scrape succeeded via curl_cffi for {url}")
                     return resp.text
             except Exception as e:
@@ -60,37 +60,56 @@ class LetterboxdService:
         try:
             scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
             resp = scraper.get(url, headers=headers, timeout=timeout)
-            if resp.status_code == 200 and resp.text:
+            if resp.status_code == 200 and resp.text and "<title>Notice</title>" not in resp.text and "Just a moment..." not in resp.text:
                 logger.info(f"Scrape succeeded via cloudscraper for {url}")
                 return resp.text
         except Exception:
             pass
 
-        # Stage 3: ScraperAPI
+        # Stage 3: ScraperAPI (Fast HTML)
         scraper_key = getattr(settings, 'scraperapi_key', None) or os.getenv("SCRAPERAPI_KEY")
         if scraper_key:
             import requests
             try:
                 params = {"api_key": scraper_key, "url": url, "keep_headers": "true", "render": "false"}
-                resp = requests.get("https://api.scraperapi.com", params=params, headers=headers, timeout=5)
+                resp = requests.get("https://api.scraperapi.com", params=params, headers=headers, timeout=20)
                 if resp.status_code == 200 and resp.text:
-                    logger.info(f"Scrape succeeded via ScraperAPI for {url}")
+                    logger.info(f"Scrape succeeded via ScraperAPI (fast) for {url}")
                     return resp.text
             except Exception as e:
-                logger.warning(f"ScraperAPI fetch failed for {url}: {e}")
+                logger.warning(f"ScraperAPI fast fetch failed for {url}: {e}")
 
-        # Stage 4: ScrapingAnt
+            # Stage 3b: ScraperAPI (Render JS mode - bypasses hard Cloudflare challenge on Cloud IPs)
+            try:
+                params = {"api_key": scraper_key, "url": url, "keep_headers": "true", "render": "true"}
+                resp = requests.get("https://api.scraperapi.com", params=params, headers=headers, timeout=30)
+                if resp.status_code == 200 and resp.text:
+                    logger.info(f"Scrape succeeded via ScraperAPI (render) for {url}")
+                    return resp.text
+            except Exception as e:
+                logger.warning(f"ScraperAPI render fetch failed for {url}: {e}")
+
+        # Stage 4: ScrapingAnt (residential proxy)
         scrapingant_key = getattr(settings, 'scrapingant_key', None) or os.getenv("SCRAPINGANT_KEY")
         if scrapingant_key:
             import requests
             try:
                 params = {"x-api-key": scrapingant_key, "url": url, "browser": "false", "proxy_type": "residential"}
-                resp = requests.get("https://api.scrapingant.com/v2/general", params=params, timeout=5)
+                resp = requests.get("https://api.scrapingant.com/v2/general", params=params, timeout=20)
                 if resp.status_code == 200 and resp.text:
-                    logger.info(f"Scrape succeeded via ScrapingAnt for {url}")
+                    logger.info(f"Scrape succeeded via ScrapingAnt (fast) for {url}")
                     return resp.text
             except Exception as e:
-                logger.warning(f"ScrapingAnt fetch failed for {url}: {e}")
+                logger.warning(f"ScrapingAnt fast fetch failed for {url}: {e}")
+
+            try:
+                params = {"x-api-key": scrapingant_key, "url": url, "browser": "true", "proxy_type": "residential"}
+                resp = requests.get("https://api.scrapingant.com/v2/general", params=params, timeout=30)
+                if resp.status_code == 200 and resp.text:
+                    logger.info(f"Scrape succeeded via ScrapingAnt (browser) for {url}")
+                    return resp.text
+            except Exception as e:
+                logger.warning(f"ScrapingAnt browser fetch failed for {url}: {e}")
 
         # Stage 5: ZenRows
         zenrows_key = getattr(settings, 'zenrows_key', None) or os.getenv("ZENROWS_KEY")
@@ -98,7 +117,7 @@ class LetterboxdService:
             import requests
             try:
                 params = {"api_key": zenrows_key, "url": url}
-                resp = requests.get("https://api.zenrows.com/v1/", params=params, timeout=5)
+                resp = requests.get("https://api.zenrows.com/v1/", params=params, timeout=20)
                 if resp.status_code == 200 and resp.text:
                     logger.info(f"Scrape succeeded via ZenRows for {url}")
                     return resp.text
@@ -114,6 +133,16 @@ class LetterboxdService:
         except Exception:
             pass
 
+        return None
+
+    def _fetch_url_with_retry(self, url: str, max_retries: int = 3) -> Optional[str]:
+        for attempt in range(max_retries + 1):
+            res = self._fetch_url(url)
+            if res:
+                return res
+            if attempt < max_retries:
+                import time
+                time.sleep(2)
         return None
 
     async def fetch_profile(self, username: str) -> dict:
@@ -1052,7 +1081,7 @@ class LetterboxdService:
                 while True:
                     check_cancelled()
                     try:
-                        html = self._fetch_url(f"https://letterboxd.com/{username}/diary/page/{p}/")
+                        html = self._fetch_url_with_retry(f"https://letterboxd.com/{username}/diary/page/{p}/")
                         if not html:
                             break
                         soup = BeautifulSoup(html, "html.parser")
@@ -1105,7 +1134,7 @@ class LetterboxdService:
                             seen_diary_slugs.add(slug)
                             items_in_page += 1
 
-                        if items_in_page == 0 or not soup.select_one("a.next"):
+                        if items_in_page == 0 or not soup.select_one("a.next, a.paginate-next"):
                             break
                         p += 1
                     except Exception as diary_err:
@@ -1119,7 +1148,7 @@ class LetterboxdService:
                 while True:
                     check_cancelled()
                     try:
-                        html = self._fetch_url(f"https://letterboxd.com/{username}/films/page/{p}/")
+                        html = self._fetch_url_with_retry(f"https://letterboxd.com/{username}/films/page/{p}/")
                         if not html:
                             break
                         soup = BeautifulSoup(html, "html.parser")
@@ -1137,7 +1166,7 @@ class LetterboxdService:
                         if not items and p > 1:
                             break
                         films.extend(items)
-                        if not soup.select_one("a.next"):
+                        if not soup.select_one("a.next, a.paginate-next"):
                             break
                         p += 1
                     except Exception as films_err:
@@ -1198,7 +1227,7 @@ class LetterboxdService:
                 while True:
                     check_cancelled()
                     try:
-                        html = self._fetch_url(f"https://letterboxd.com/{username}/watchlist/page/{p}/")
+                        html = self._fetch_url_with_retry(f"https://letterboxd.com/{username}/watchlist/page/{p}/")
                         if not html:
                             break
                         soup = BeautifulSoup(html, "html.parser")
@@ -1206,7 +1235,7 @@ class LetterboxdService:
                         if not slugs:
                             break
                         watchlist.extend(slugs)
-                        if not soup.select_one("a.next"):
+                        if not soup.select_one("a.next, a.paginate-next"):
                             break
                         p += 1
                     except Exception:
@@ -1219,7 +1248,7 @@ class LetterboxdService:
                 p = 1
                 while True:
                     check_cancelled()
-                    html = self._fetch_url(f"https://letterboxd.com/{username}/likes/films/page/{p}/")
+                    html = self._fetch_url_with_retry(f"https://letterboxd.com/{username}/likes/films/page/{p}/")
                     if not html:
                         break
                     soup = BeautifulSoup(html, "html.parser")
@@ -1227,7 +1256,7 @@ class LetterboxdService:
                     if not slugs:
                         break
                     liked_films.extend(slugs)
-                    if not soup.select_one("a.next"):
+                    if not soup.select_one("a.next, a.paginate-next"):
                         break
                     p += 1
 
@@ -1235,18 +1264,19 @@ class LetterboxdService:
                 check_cancelled()
                 sync_progress[user_id]["current_item"] = "Fetching reviews..."
                 p = 1
+                base_reviews_path = "reviews"
                 while True:
                     check_cancelled()
-                    # Try main reviews path, fallback to films/reviews if empty
-                    url = f"https://letterboxd.com/{username}/reviews/page/{p}/"
-                    html = self._fetch_url(url)
+                    url = f"https://letterboxd.com/{username}/{base_reviews_path}/page/{p}/"
+                    html = self._fetch_url_with_retry(url)
                     if not html and p == 1:
-                        html = self._fetch_url(f"https://letterboxd.com/{username}/films/reviews/page/{p}/")
+                        base_reviews_path = "films/reviews"
+                        url = f"https://letterboxd.com/{username}/{base_reviews_path}/page/{p}/"
+                        html = self._fetch_url_with_retry(url)
                     if not html:
                         break
                     soup = BeautifulSoup(html, "html.parser")
                     
-                    # Support both legacy and modern Letterboxd DOM selectors
                     listitems = soup.select("li.film-detail, .listitem, .paper-row, li.entry, div.film-detail, div.film-detail-content")
                     items = []
                     for item in listitems:
@@ -1292,7 +1322,7 @@ class LetterboxdService:
                     if not items:
                         break
                     reviews.extend(items)
-                    if not soup.select_one("a.next"):
+                    if not soup.select_one("a.next, a.paginate-next"):
                         break
                     p += 1
 
