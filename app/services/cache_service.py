@@ -76,16 +76,6 @@ class CacheKeys:
     def person_profile(person_id: str) -> str:
         return f'person:{person_id}:profile'
 
-    @staticmethod
-    def credits(content_id: str) -> str:
-        return f'credits:{content_id}'
-
-    @staticmethod
-    def similar(content_id: str) -> str:
-        return f'similar:{content_id}'
-
-_l1_cache = {}
-
 class CacheService:
     TTL_CONTENT      = 3600
     TTL_USER_PROFILE = 300
@@ -98,23 +88,12 @@ class CacheService:
 
     @staticmethod
     async def get(key: str):
-        cached_l1 = _l1_cache.get(key)
-        if cached_l1:
-            val, expiry = cached_l1
-            if expiry is None or expiry > time.time():
-                try: return copy.deepcopy(val)
-                except Exception: return val
-            else:
-                _l1_cache.pop(key, None)
-
         if settings.app_env == 'development':
             cached = _local_cache.get(key)
             if cached:
                 val, expiry = cached
                 if expiry is None or expiry > time.time():
-                    _l1_cache[key] = (val, expiry)
-                    try: return copy.deepcopy(val)
-                    except Exception: return val
+                    return val
                 else:
                     _local_cache.pop(key, None)
             return None
@@ -122,29 +101,23 @@ class CacheService:
             if _is_async:
                 val = await _async_redis.get(key)
             else:
+                # Fallback: run sync in a thread pool to avoid blocking event loop
                 import asyncio
                 val = await asyncio.get_event_loop().run_in_executor(None, _sync_redis.get, key)
             if val is None:
                 return None
-            parsed = json.loads(val)
-            _l1_cache[key] = (parsed, time.time() + 60)
-            try: return copy.deepcopy(parsed)
-            except Exception: return parsed
+            return json.loads(val)
         except Exception as e:
             logger.error(f'Cache get failed for {key}: {e}')
             return None
 
     @staticmethod
     async def set(key: str, value, ttl: int):
-        try:
-            copied_value = copy.deepcopy(value)
-        except Exception:
-            copied_value = value
-        
-        l1_ttl = min(ttl, 300)
-        _l1_cache[key] = (copied_value, time.time() + l1_ttl)
-
         if settings.app_env == 'development':
+            try:
+                copied_value = copy.deepcopy(value)
+            except Exception:
+                copied_value = value
             _local_cache[key] = (copied_value, time.time() + ttl)
             return
         try:
@@ -159,9 +132,8 @@ class CacheService:
 
     @staticmethod
     async def delete(key: str):
-        _l1_cache.pop(key, None)
-        _local_cache.pop(key, None)
         if settings.app_env == 'development':
+            _local_cache.pop(key, None)
             return
         try:
             if _is_async:

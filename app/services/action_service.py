@@ -418,7 +418,6 @@ class ActionService:
                 for m in ['movies', 'series', 'anime']:
                     key = f"v2:{CacheKeys.discover(m, uid_str, today_str)}"
                     await cache.delete(key)
-                await cache.delete(f"u_status:{uid_str}")
             except Exception as cache_err:
                 logger.error(f"Failed to invalidate discover cache after action: {cache_err}")
             return ContentActionResponse(
