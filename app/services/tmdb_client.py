@@ -1505,14 +1505,14 @@ class TMDBClient:
         """Fetch title logo PNG image URL directly from TMDB images endpoint."""
         if not self.api_key: return None
         path = "movie" if content_type == "movie" else "tv"
-        async with httpx.AsyncClient() as client:
-            try:
-                resp = await client.get(
-                    f"{self.BASE_URL}/{path}/{tmdb_id}/images",
-                    params={"api_key": self.api_key},
-                    timeout=10.0
-                )
-                resp.raise_for_status()
+        client = self._client()
+        try:
+            resp = await client.get(
+                f"{self.BASE_URL}/{path}/{tmdb_id}/images",
+                params={"api_key": self.api_key},
+                timeout=5.0
+            )
+            if resp.status_code == 200:
                 logos = resp.json().get("logos", [])
                 if logos:
                     # 1. English logo
@@ -1530,10 +1530,10 @@ class TMDBClient:
                     if valid_logos:
                         valid_logos.sort(key=lambda x: x.get("vote_count", 0), reverse=True)
                         return f"{self.IMAGE_BASE}{valid_logos[0]['file_path']}"
-                return None
-            except Exception as e:
-                logger.error(f"Error fetching title logo for {content_type} {tmdb_id}: {e}")
-                return None
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching title logo for {content_type} {tmdb_id}: {e}")
+            return None
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=3))
     async def get_trailer_key(self, tmdb_id: int, content_type: str = "movie") -> Optional[str]:

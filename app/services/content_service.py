@@ -335,7 +335,31 @@ class ContentService:
         # Resolve TMDB/MAL IDs to real DB UUIDs so Flutter gets stable, correct IDs
         await self._resolve_items_to_db_uuids(all_items)
 
-        # Concurrently fetch PNG title logos for top items in each category
+        # 1. Batch pre-populate title logos from DB for items that already have them
+        tmdb_ids_in_list = [int(it['tmdb_id']) for it in (m_list + s_list) if isinstance(it, dict) and it.get('tmdb_id')]
+        if tmdb_ids_in_list:
+            try:
+                logo_db_res = await self.db.execute(text("""
+                    SELECT tmdb_id, logo_url, title_logo FROM public.content
+                    WHERE tmdb_id = ANY(:tids) AND (logo_url IS NOT NULL OR title_logo IS NOT NULL)
+                """), {"tids": tmdb_ids_in_list})
+                db_logo_map = {}
+                for r in logo_db_res.fetchall():
+                    l_val = r[1] or r[2]
+                    if l_val:
+                        db_logo_map[r[0]] = l_val
+                
+                for it in (m_list + s_list):
+                    if isinstance(it, dict) and it.get('tmdb_id'):
+                        tid = int(it['tmdb_id'])
+                        if tid in db_logo_map:
+                            it['title_logo_url'] = db_logo_map[tid]
+                            it['logo_url'] = db_logo_map[tid]
+                            it['title_logo'] = db_logo_map[tid]
+            except Exception as logo_db_err:
+                logger.warning(f"Error reading logo URLs from DB: {logo_db_err}")
+
+        # 2. Concurrently fetch PNG title logos for remaining top items in each category
         async def _fetch_logo_for_item(item: dict):
             if not isinstance(item, dict): return
             if item.get('title_logo_url') or item.get('logo_url') or item.get('title_logo'):
@@ -344,15 +368,24 @@ class ContentService:
             c_type = item.get('content_type') or 'movie'
             if tmdb_id:
                 try:
-                    logo = await asyncio.wait_for(self.tmdb_client.get_title_logo(int(tmdb_id), c_type), timeout=2.5)
+                    logo = await asyncio.wait_for(self.tmdb_client.get_title_logo(int(tmdb_id), c_type), timeout=3.5)
                     if logo:
                         item['title_logo_url'] = logo
                         item['logo_url'] = logo
                         item['title_logo'] = logo
+                        # Persist logo to DB so all future requests get it instantly from DB
+                        try:
+                            await self.db.execute(
+                                text("UPDATE public.content SET logo_url = :logo, title_logo = :logo WHERE tmdb_id = :tmdb_id"),
+                                {"logo": logo, "tmdb_id": int(tmdb_id)}
+                            )
+                            await self.db.commit()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
-        logo_tasks = [_fetch_logo_for_item(it) for it in (m_list[:10] + s_list[:10]) if isinstance(it, dict)]
+        logo_tasks = [_fetch_logo_for_item(it) for it in (m_list[:12] + s_list[:12]) if isinstance(it, dict)]
         if logo_tasks:
             try:
                 await asyncio.gather(*logo_tasks, return_exceptions=True)
