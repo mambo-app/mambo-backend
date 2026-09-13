@@ -39,53 +39,14 @@ class LetterboxdService:
             count += 0.5
         return count if count > 0 else None
 
-    def _fetch_url(self, url: str, timeout: int = 25) -> Optional[str]:
+    def _fetch_url(self, url: str, timeout: int = 15) -> Optional[str]:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
 
-        # Stage 1: ScraperAPI
-        scraper_key = getattr(settings, 'scraperapi_key', None) or os.getenv("SCRAPERAPI_KEY")
-        if scraper_key:
-            import requests
-            try:
-                params = {"api_key": scraper_key, "url": url, "keep_headers": "true", "render": "false"}
-                resp = requests.get("https://api.scraperapi.com", params=params, headers=headers, timeout=timeout)
-                if resp.status_code == 200 and resp.text:
-                    logger.info(f"Scrape succeeded via ScraperAPI for {url}")
-                    return resp.text
-            except Exception as e:
-                logger.warning(f"ScraperAPI fetch failed for {url}: {e}")
-
-        # Stage 2: ScrapingAnt
-        scrapingant_key = getattr(settings, 'scrapingant_key', None) or os.getenv("SCRAPINGANT_KEY")
-        if scrapingant_key:
-            import requests
-            try:
-                params = {"x-api-key": scrapingant_key, "url": url}
-                resp = requests.get("https://api.scrapingant.com/v2/general", params=params, timeout=timeout)
-                if resp.status_code == 200 and resp.text:
-                    logger.info(f"Scrape succeeded via ScrapingAnt for {url}")
-                    return resp.text
-            except Exception as e:
-                logger.warning(f"ScrapingAnt fetch failed for {url}: {e}")
-
-        # Stage 3: ZenRows
-        zenrows_key = getattr(settings, 'zenrows_key', None) or os.getenv("ZENROWS_KEY")
-        if zenrows_key:
-            import requests
-            try:
-                params = {"api_key": zenrows_key, "url": url}
-                resp = requests.get("https://api.zenrows.com/v1/", params=params, timeout=timeout)
-                if resp.status_code == 200 and resp.text:
-                    logger.info(f"Scrape succeeded via ZenRows for {url}")
-                    return resp.text
-            except Exception as e:
-                logger.warning(f"ZenRows fetch failed for {url}: {e}")
-
-        # Stage 4: curl_cffi (impersonate browser TLS fingerprint)
+        # Stage 1: curl_cffi (impersonate browser TLS fingerprint - fastest & most reliable)
         if curl_requests:
             try:
                 resp = curl_requests.get(url, impersonate="chrome124", headers=headers, timeout=timeout)
@@ -94,6 +55,45 @@ class LetterboxdService:
                     return resp.text
             except Exception as e:
                 logger.warning(f"curl_cffi fetch failed for {url}: {e}")
+
+        # Stage 2: ScraperAPI
+        scraper_key = getattr(settings, 'scraperapi_key', None) or os.getenv("SCRAPERAPI_KEY")
+        if scraper_key:
+            import requests
+            try:
+                params = {"api_key": scraper_key, "url": url, "keep_headers": "true", "render": "false"}
+                resp = requests.get("https://api.scraperapi.com", params=params, headers=headers, timeout=min(timeout, 10))
+                if resp.status_code == 200 and resp.text:
+                    logger.info(f"Scrape succeeded via ScraperAPI for {url}")
+                    return resp.text
+            except Exception as e:
+                logger.warning(f"ScraperAPI fetch failed for {url}: {e}")
+
+        # Stage 3: ScrapingAnt
+        scrapingant_key = getattr(settings, 'scrapingant_key', None) or os.getenv("SCRAPINGANT_KEY")
+        if scrapingant_key:
+            import requests
+            try:
+                params = {"x-api-key": scrapingant_key, "url": url}
+                resp = requests.get("https://api.scrapingant.com/v2/general", params=params, timeout=min(timeout, 10))
+                if resp.status_code == 200 and resp.text:
+                    logger.info(f"Scrape succeeded via ScrapingAnt for {url}")
+                    return resp.text
+            except Exception as e:
+                logger.warning(f"ScrapingAnt fetch failed for {url}: {e}")
+
+        # Stage 4: ZenRows
+        zenrows_key = getattr(settings, 'zenrows_key', None) or os.getenv("ZENROWS_KEY")
+        if zenrows_key:
+            import requests
+            try:
+                params = {"api_key": zenrows_key, "url": url}
+                resp = requests.get("https://api.zenrows.com/v1/", params=params, timeout=min(timeout, 10))
+                if resp.status_code == 200 and resp.text:
+                    logger.info(f"Scrape succeeded via ZenRows for {url}")
+                    return resp.text
+            except Exception as e:
+                logger.warning(f"ZenRows fetch failed for {url}: {e}")
 
         # Stage 5: cloudscraper / direct requests fallback
         try:
@@ -1039,11 +1039,31 @@ class LetterboxdService:
                                     rating_str = item.findtext("{https://letterboxd.com}memberRating")
                                     link = item.findtext("link") or ""
                                     slug = link.rstrip("/").split("/")[-1] if "film/" in link else None
+                                    if slug and "/" in slug:
+                                        slug = slug.split("/")[0]
                                     if not slug and film_title:
                                         slug = film_title.lower().replace(" ", "-")
                                     if slug:
                                         rating_val = float(rating_str) if rating_str else None
                                         films.append({"slug": slug, "rating": rating_val, "tmdb_id": tmdb_id, "title": film_title})
+                                        
+                                        # Extract review text from RSS description if present
+                                        desc = item.findtext("description") or ""
+                                        if desc:
+                                            try:
+                                                desc_soup = BeautifulSoup(desc, "html.parser")
+                                                for img in desc_soup.find_all("img"):
+                                                    img.decompose()
+                                                review_text = desc_soup.get_text(separator="\n").strip()
+                                                if review_text and len(review_text) > 3:
+                                                    reviews.append({
+                                                        "slug": slug,
+                                                        "review_text": review_text,
+                                                        "rating": rating_val,
+                                                        "watch_date": None
+                                                    })
+                                            except Exception:
+                                                pass
                     except Exception as rss_err:
                         logger.warning(f"RSS fallback error: {rss_err}")
 
@@ -1091,42 +1111,52 @@ class LetterboxdService:
                 # Fetch Reviews (all pages)
                 check_cancelled()
                 sync_progress[user_id]["current_item"] = "Fetching reviews..."
-                reviews = []
                 p = 1
                 while True:
                     check_cancelled()
-                    html = self._fetch_url(f"https://letterboxd.com/{username}/reviews/page/{p}/")
+                    # Try main reviews path, fallback to films/reviews if empty
+                    url = f"https://letterboxd.com/{username}/reviews/page/{p}/"
+                    html = self._fetch_url(url)
+                    if not html and p == 1:
+                        html = self._fetch_url(f"https://letterboxd.com/{username}/films/reviews/page/{p}/")
                     if not html:
                         break
                     soup = BeautifulSoup(html, "html.parser")
-                    listitems = soup.select(".listitem")
+                    
+                    # Support both legacy and modern Letterboxd DOM selectors
+                    listitems = soup.select("li.film-detail, .listitem, .paper-row, li.entry, div.film-detail, div.film-detail-content")
                     items = []
                     for item in listitems:
-                        a_tag = item.select_one("h2.primaryname a")
+                        a_tag = item.select_one("h2.headline-2 a, h2.primaryname a, .film-detail-content h2 a, a[href*='/film/']")
                         if not a_tag:
                             continue
                         href = a_tag.get("href", "")
+                        if "/film/" not in href:
+                            continue
                         slug = href.split("/film/")[-1].strip("/")
                         if "/" in slug:
                             slug = slug.split("/")[0]
                         if not slug:
                             continue
                         
-                        body_text_div = item.select_one("div.body-text")
+                        body_text_div = item.select_one("div.body-text, div.review, div.body-text.-prose, div.collapsible-text, div.text-slug, .body-text")
                         review_text = body_text_div.get_text(separator="\n").strip() if body_text_div else None
                         if not review_text:
                             continue
                         
-                        rating_title = item.select_one("span.inline-rating svg title")
-                        rating = self.parse_stars(rating_title.get_text()) if rating_title else None
+                        rating_el = item.select_one("span.inline-rating, span.rating, span.inline-rating svg title, span.rating title")
+                        rating = None
+                        if rating_el:
+                            rating_text = rating_el.get("title") or rating_el.get_text()
+                            rating = self.parse_stars(rating_text)
                         
-                        time_tag = item.select_one("time.timestamp")
+                        time_tag = item.select_one("time.timestamp, time[datetime], span.timestamp")
                         watch_date = None
                         if time_tag:
-                            dt_str = time_tag.get("datetime")
+                            dt_str = time_tag.get("datetime") or time_tag.get_text()
                             if dt_str:
                                 try:
-                                    watch_date = datetime.strptime(dt_str, "%Y-%m-%d").date()
+                                    watch_date = datetime.strptime(dt_str.split("T")[0], "%Y-%m-%d").date()
                                 except Exception:
                                     pass
                                     
