@@ -1011,12 +1011,25 @@ class ContentService:
         start_str = start_date_obj.isoformat()
         end_str = end_date_obj.isoformat()
 
+        def _parse_date_obj(d_val):
+            if not d_val: return None
+            s = str(d_val).split('T')[0].strip()
+            try: return date.fromisoformat(s)
+            except Exception: pass
+            try: return datetime.strptime(s, "%b %d, %Y").date()
+            except Exception: pass
+            try: return datetime.strptime(s, "%B %d, %Y").date()
+            except Exception: pass
+            return None
+
         cache_key = f"v16000:cal:{mode}:{start_str}:{days}:{page}"
         try:
             cached = await cache.get(cache_key)
             if cached and isinstance(cached, dict):
+                import copy
+                res_copy = copy.deepcopy(cached)
+                cached_items = res_copy.get('items', [])
                 if user_id:
-                    cached_items = cached.get('items', [])
                     await self._populate_user_status(cached_items, user_id)
                     def _sort_key(x):
                         is_user_show = bool(
@@ -1026,13 +1039,13 @@ class ContentService:
                             (x.get('status') and str(x.get('status')).lower() not in ('none', ''))
                         )
                         tier = 0 if is_user_show else 1
-                        d_obj = _parse_date_obj(x.get('release_date'))
-                        d_val = d_obj if d_obj else date(9999, 12, 31)
-                        return (tier, d_val)
+                        r_date = str(x.get('release_date') or '9999-12-31').split('T')[0]
+                        return (tier, r_date)
                     cached_items.sort(key=_sort_key)
-                    cached['items'] = cached_items
-                return cached
-        except Exception: pass
+                    res_copy['items'] = cached_items
+                return res_copy
+        except Exception as e_c:
+            logger.warning(f"Cache lookup failed in calendar_roadmap: {e_c}")
 
         # 1. Local DB upcoming items for this mode within target window
         local_db_items = []
@@ -1075,24 +1088,8 @@ class ContentService:
                 if isinstance(pr, list):
                     raw_series.extend(pr)
             
-            # Enrich series items with details (including next_episode_to_air) concurrently
-            top_ids = [s.get('tmdb_id') or s.get('id') for s in raw_series if s.get('tmdb_id') or s.get('id')][:40]
-            details_res = await asyncio.gather(
-                *[self.tmdb_client.get_series_details(str(tid)) for tid in top_ids if tid],
-                return_exceptions=True
-            )
-            details_map = {}
-            for dr in details_res:
-                if isinstance(dr, dict) and dr.get('id'):
-                    details_map[str(dr['id'])] = dr
-                    
-            external_items = []
-            for s in raw_series:
-                sid = str(s.get('tmdb_id') or s.get('id') or '')
-                if sid in details_map:
-                    external_items.append(details_map[sid])
-                else:
-                    external_items.append(s)
+            # Instant non-blocking series discovery (no 40 blocking HTTP network calls during HTTP response)
+            external_items = raw_series
 
         else: # anime
             res_anime = await self.mal_client.get_current_season_anime(page=page)
@@ -1237,16 +1234,43 @@ class ContentService:
         except Exception as e_undated:
             logger.warning(f"Undated DB calendar query exception: {e_undated}")
 
-        # 3. Attach user status if user_id is provided
+        # 5. Append undated / TBA items to the bottom of the timeline
+        for u_item in undated_db_items:
+            t_key = str(u_item.get('title', '')).strip().lower()
+            if t_key and t_key not in seen_titles:
+                seen_titles.add(t_key)
+                items.append(u_item)
+
+        # 6. Save clean base payload into Redis BEFORE attaching user-specific status
+        base_items = []
+        for it in items:
+            clean_item = dict(it)
+            # Remove any raw UUID or datetime objects for JSON safety
+            for k, v in list(clean_item.items()):
+                if isinstance(v, (UUID, datetime, date)):
+                    clean_item[k] = str(v)
+            base_items.append(clean_item)
+
+        base_result = {
+            "mode": mode,
+            "start_date": start_str,
+            "end_date": end_str,
+            "page": page,
+            "items": base_items
+        }
+
+        try:
+            await cache.set(cache_key, base_result, ttl=CacheService.TTL_DISCOVER)
+        except Exception as c_err:
+            logger.warning(f"Cache set error in calendar_roadmap for {cache_key}: {c_err}")
+
+        # 7. Attach user-specific status in-memory for the current request
         if user_id:
             try:
                 await self._populate_user_status(items, user_id)
-                if undated_db_items:
-                    await self._populate_user_status(undated_db_items, user_id)
             except Exception as u_err:
                 logger.warning(f"User status population error in calendar_roadmap: {u_err}")
 
-        # 4. Sort dated items: User's tracked/watched/interested/notified shows first (Tier 0), then global discovery shows (Tier 1), both chronologically by air date
         def _sort_key(x):
             is_user_show = bool(
                 x.get('is_watched') or
@@ -1258,30 +1282,18 @@ class ContentService:
                 (x.get('status') and str(x.get('status')).lower() not in ('none', ''))
             )
             tier = 0 if is_user_show else 1
-            d_obj = _parse_date_obj(x.get('release_date'))
-            d_val = d_obj if d_obj else date(9999, 12, 31)
-            return (tier, d_val)
+            r_date = str(x.get('release_date') or '9999-12-31').split('T')[0]
+            return (tier, r_date)
 
         items.sort(key=_sort_key)
 
-        # 5. Append undated / TBA items to the bottom of the timeline
-        for u_item in undated_db_items:
-            t_key = str(u_item.get('title', '')).strip().lower()
-            if t_key and t_key not in seen_titles:
-                seen_titles.add(t_key)
-                items.append(u_item)
-
-        result = {
+        return {
             "mode": mode,
             "start_date": start_str,
             "end_date": end_str,
             "page": page,
             "items": items
         }
-        try:
-            await cache.set(cache_key, result, ttl=1800)
-        except Exception: pass
-        return result
 
     async def sync_announced_status(self, max_items_per_run: int = 400) -> Dict[str, int]:
         """
@@ -1555,6 +1567,9 @@ class ContentService:
         try:
             cached = await cache.get(cache_key)
             if cached and isinstance(cached, dict):
+                if user_id:
+                    cached_items = cached.get('items', [])
+                    await self._populate_user_status(cached_items, user_id)
                 return cached
         except Exception:
             pass
@@ -2048,13 +2063,171 @@ class ContentService:
             -- AND r.created_at > now() - interval '30 days' 
             ORDER BY r.likes_count DESC, r.created_at DESC LIMIT :limit
         '''), {'limit': limit})
-        return [dict(row) for row in result.mappings()]
+    async def _attach_user_status_to_response(self, resp: ContentResponse, user_id: Union[str, UUID], content_id: Union[str, UUID]) -> None:
+        try:
+            uid_obj = user_id if isinstance(user_id, UUID) else UUID(str(user_id))
+            cid_uuid = content_id if isinstance(content_id, UUID) else UUID(str(content_id))
+
+            unified_sql = text("""
+                WITH user_status AS (
+                    SELECT s.is_watched, s.is_liked, s.is_dropped, s.is_interested, s.watch_count, s.rating,
+                           s.status, s.progress_episodes, s.rewatch_count, s.last_activity_at,
+                           s.last_watched_season, s.last_watched_episode
+                    FROM user_content_status s
+                    WHERE s.user_id = :uid AND s.content_id = :cid
+                    LIMIT 1
+                ),
+                cal_alert AS (
+                    SELECT EXISTS (
+                        SELECT 1 FROM calendar_alerts ca WHERE ca.user_id = :uid AND ca.content_id = :cid
+                    ) as is_notified
+                ),
+                season_statuses AS (
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'season_number', s.sn,
+                        'status', COALESCE(uss.status, 'none'),
+                        'progress_episodes', COALESCE(uss.progress_episodes, 0),
+                        'total_episodes', COALESCE(
+                            uss.total_episodes,
+                            (
+                                SELECT (elem->>'episode_count')::int 
+                                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.seasons) = 'array' THEN c.seasons ELSE '[]'::jsonb END) elem 
+                                WHERE (elem->>'season_number')::int = s.sn 
+                                LIMIT 1
+                            ),
+                            CASE WHEN :total_seasons > 0 THEN ceil(CAST(:total_episodes AS FLOAT) / :total_seasons)::int ELSE 0 END
+                        ),
+                        'updated_at', uss.updated_at
+                    ) ORDER BY s.sn ASC) as seasons
+                    FROM (SELECT generate_series(1, COALESCE(:total_seasons, 1)) as sn) s
+                    CROSS JOIN content c
+                    LEFT JOIN user_season_status uss ON uss.content_id = c.id AND uss.user_id = :uid AND uss.season_number = s.sn
+                    WHERE c.id = :cid
+                ),
+                friends_act AS (
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'user_id', p.id,
+                        'username', p.username,
+                        'display_name', p.display_name,
+                        'avatar_url', p.avatar_url,
+                        'status', p.status,
+                        'rating', p.rating,
+                        'progress_episodes', p.progress_episodes,
+                        'last_watched_season', p.last_watched_season,
+                        'last_watched_episode', p.last_watched_episode
+                    )) as friends
+                    FROM (
+                        SELECT p.id, p.username, p.display_name, p.avatar_url, ucs.status, ucs.rating, ucs.progress_episodes, ucs.last_watched_season, ucs.last_watched_episode
+                        FROM friends f
+                        JOIN profiles p ON (f.user_id1 = :uid AND p.id = f.user_id2) OR (f.user_id2 = :uid AND p.id = f.user_id1)
+                        JOIN user_content_status ucs ON ucs.user_id = p.id AND ucs.content_id = :cid
+                        WHERE (ucs.is_watched = true OR ucs.is_interested = true OR ucs.status != 'none')
+                        LIMIT 10
+                    ) p
+                ),
+                reviews_list AS (
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'id', r.id,
+                        'rating', COALESCE(r.rating, r.star_rating),
+                        'text_review', r.text_review,
+                        'created_at', r.created_at,
+                        'watch_history_id', r.watch_history_id
+                    ) ORDER BY r.created_at ASC) as revs
+                    FROM reviews r
+                    WHERE r.user_id = :uid AND r.content_id = :cid AND (r.is_deleted = false OR r.is_deleted IS NULL)
+                )
+                SELECT 
+                    (SELECT row_to_json(us) FROM user_status us) as user_status,
+                    (SELECT is_notified FROM cal_alert) as is_notified,
+                    (SELECT seasons FROM season_statuses) as season_statuses,
+                    (SELECT friends FROM friends_act) as friends_activity,
+                    (SELECT revs FROM reviews_list) as reviews
+            """)
+
+            unified_res = await self.db.execute(unified_sql, {
+                'uid': uid_obj, 
+                'cid': cid_uuid, 
+                'total_seasons': resp.total_seasons or 1, 
+                'total_episodes': resp.total_episodes or 0
+            })
+            row = unified_res.mappings().first()
+            if not row: return
+
+            u_status = row['user_status']
+            if u_status and isinstance(u_status, dict):
+                resp.is_watched = u_status.get('is_watched', False)
+                resp.is_liked = u_status.get('is_liked', False)
+                resp.is_dropped = u_status.get('is_dropped', False)
+                resp.is_interested = u_status.get('is_interested', False)
+                resp.watch_count = u_status.get('watch_count', 0)
+                resp.user_rating = float(u_status['rating']) if u_status.get('rating') is not None else None
+                
+                raw_status = u_status.get('status') or 'none'
+                resp.status = ContentStatus.COMPLETED if (raw_status == 'none' and resp.is_watched) else ContentStatus(raw_status)
+                resp.progress_episodes = u_status.get('progress_episodes') or 0
+                resp.last_watched_season = u_status.get('last_watched_season') or 0
+                resp.last_watched_episode = u_status.get('last_watched_episode') or 0
+                resp.rewatch_count = u_status.get('rewatch_count') or 0
+                resp.last_activity_at = u_status.get('last_activity_at')
+
+            resp.is_notified = bool(row['is_notified'])
+
+            # Season Statuses
+            seasons_raw = row['season_statuses']
+            if seasons_raw and isinstance(seasons_raw, list):
+                resp.season_statuses = [
+                    SeasonStatusResponse(
+                        season_number=s.get('season_number', 1),
+                        status=s.get('status', 'none'),
+                        progress_episodes=s.get('progress_episodes', 0),
+                        total_episodes=s.get('total_episodes', 0),
+                        updated_at=s.get('updated_at')
+                    ) for s in seasons_raw
+                ]
+
+            # Friends Activity
+            friends_raw = row['friends_activity']
+            if friends_raw and isinstance(friends_raw, list):
+                from app.models.content import FriendActivityResponse
+                resp.friends_activity = [
+                    FriendActivityResponse(
+                        user_id=f['user_id'],
+                        username=f['username'],
+                        display_name=f['display_name'],
+                        avatar_url=f['avatar_url'],
+                        status=f['status'],
+                        rating=float(f['rating']) if f.get('rating') is not None else None,
+                        progress_episodes=f.get('progress_episodes') or 0,
+                        last_watched_season=f.get('last_watched_season') or 0,
+                        last_watched_episode=f.get('last_watched_episode') or 0
+                    ) for f in friends_raw
+                ]
+
+            # Reviews
+            revs_raw = row['reviews']
+            if revs_raw and isinstance(revs_raw, list) and len(revs_raw) > 0:
+                latest_rev = revs_raw[-1]
+                resp.review_text = latest_rev.get('text_review')
+                resp.user_review = {
+                    'id': str(latest_rev.get('id')),
+                    'text_review': latest_rev.get('text_review'),
+                    'rating': latest_rev.get('rating'),
+                    'created_at': latest_rev.get('created_at'),
+                }
+        except Exception as e:
+            logger.warning(f"_attach_user_status_to_response error for {content_id}: {e}")
 
     async def get_content_by_id(self, content_id: str, user_id: Optional[str] = None) -> Optional[ContentResponse]:
         cache_key = CacheKeys.content(content_id)
-        if not user_id:
+        try:
             cached = await cache.get(cache_key)
-            if cached: return ContentResponse.model_validate(cached)
+            if cached and isinstance(cached, dict):
+                resp = ContentResponse.model_validate(cached)
+                if user_id:
+                    await self._attach_user_status_to_response(resp, user_id, resp.id)
+                return resp
+        except Exception:
+            pass
         
         try:
             # 1. Try local DB by UUID
@@ -2127,7 +2300,7 @@ class ContentService:
                 is_raw_uuid = (is_uuid or (len(content_id) == 36 and content_id.count('-') == 4))
                 title_clean = "Featured Content" if is_raw_uuid else content_id.replace('tmdb_', '').replace('series_', 'Series ').replace('movie_', 'Movie ').title()
                 fallback_uuid = str(UUID(int=abs(hash(content_id)) % (2**128)))
-                return {
+                return ContentResponse.model_validate({
                     'id': UUID(fallback_uuid),
                     'tmdb_id': num_id,
                     'title': title_clean if len(title_clean) > 2 else "Featured Content",
@@ -2140,59 +2313,12 @@ class ContentService:
                     'status': 'none',
                     'release_status': 'released',
                     'is_watched': False
-                }
+                })
             
             d = dict(row)
             
-            # 4. Fast non-blocking sync if missing info (or missing series seasons info)
-            is_series = d.get('content_type') in ['series', 'anime', 'tv']
-            has_seasons_array = isinstance(d.get('seasons'), list) and len(d.get('seasons')) > 0
-            missing_info = not d.get('synopsis') or (is_series and (not d.get('total_seasons') or d.get('total_seasons') <= 1 or not has_seasons_array))
-            if (missing_info) and d.get('tmdb_id'):
-                try:
-                    ext_task = self.tmdb_client.get_movie_details(d['tmdb_id']) if d['content_type'] == 'movie' else self.tmdb_client.get_series_details(d['tmdb_id'])
-                    ext_data = await asyncio.wait_for(ext_task, timeout=3.5)
-                    if ext_data:
-                        updated = await self._upsert_tmdb_content([ext_data], returning=True)
-                        if updated: d.update(updated[0])
-                except Exception as sync_err:
-                    logger.warning(f"Sync skipped/timeout for {content_id}: {sync_err}")
-
             # Ensure description alias is present for the App
             d['description'] = d.get('synopsis')
-            
-            # Fetch logo with 3.0s timeout and persist to DB
-            if d.get('tmdb_id') and not d.get('logo_url') and not d.get('title_logo'):
-                try:
-                    logo = await asyncio.wait_for(self.tmdb_client.get_title_logo(d['tmdb_id'], d.get('content_type', 'movie')), timeout=3.0)
-                    if logo:
-                        d['logo_url'] = logo
-                        d['title_logo'] = logo
-                        # Non-blocking DB persistence
-                        try:
-                            cid_str = str(d.get('id', ''))
-                            is_valid_uuid = False
-                            try:
-                                UUID(cid_str)
-                                is_valid_uuid = True
-                            except ValueError: pass
-                            
-                            if is_valid_uuid:
-                                await self.db.execute(
-                                    text("UPDATE content SET logo_url = :logo, title_logo = :logo WHERE tmdb_id = :tmdb_id OR id = CAST(:id AS UUID)"),
-                                    {"logo": logo, "tmdb_id": d['tmdb_id'], "id": cid_str}
-                                )
-                            else:
-                                await self.db.execute(
-                                    text("UPDATE content SET logo_url = :logo, title_logo = :logo WHERE tmdb_id = :tmdb_id"),
-                                    {"logo": logo, "tmdb_id": d['tmdb_id']}
-                                )
-                            await self.db.commit()
-                        except Exception:
-                            try: await self.db.rollback()
-                            except Exception: pass
-                except Exception as logo_err:
-                    logger.warning(f"Logo fetch skipped/timeout for {content_id}: {logo_err}")
             
             rd_val = d.get('release_date')
             rd_date_obj = None
@@ -2223,322 +2349,17 @@ class ContentService:
                 if not resp.release_status:
                     resp.release_status = 'unknown'
 
-                # Auto-sync seasons and airing status from TMDB
-                if d.get('tmdb_id'):
-                    try:
-                        raw_tmdb = await self.tmdb_client.get_raw_details(d['tmdb_id'], 'tv')
-                        if raw_tmdb:
-                            tmdb_status = raw_tmdb.get('status')
-                            in_prod = raw_tmdb.get('in_production', False)
-                            next_ep = raw_tmdb.get('next_episode_to_air')
-                            first_air = raw_tmdb.get('first_air_date') or raw_tmdb.get('release_date')
-                            if first_air:
-                                d['release_date'] = str(first_air)
-                                d['first_air_date'] = str(first_air)
-                                try:
-                                    resp.release_date = str(first_air)
-                                    resp.first_air_date = str(first_air)
-                                except Exception: pass
-                            if tmdb_status:
-                                d['release_status'] = tmdb_status
-                                d['airing_status'] = tmdb_status
-                                resp.release_status = tmdb_status
-                            d['in_production'] = in_prod
-                            d['next_episode_to_air'] = next_ep
-                            d['has_next_episode'] = next_ep is not None
-                            resp.in_production = in_prod
-                            resp.next_episode_to_air = next_ep
-                            resp.has_next_episode = next_ep is not None
-
-                            ep_cnt = raw_tmdb.get('number_of_episodes') or resp.total_episodes
-                            s_cnt = raw_tmdb.get('number_of_seasons') or resp.total_seasons
-                            seasons_raw = [
-                                {
-                                    'season_number': s.get('season_number'),
-                                    'episode_count': s.get('episode_count')
-                                } for s in raw_tmdb.get('seasons', []) if s.get('season_number', 0) > 0
-                            ] if raw_tmdb.get('seasons') else (d.get('seasons') or [])
-
-                            resp.total_episodes = ep_cnt or resp.total_episodes
-                            resp.total_seasons = s_cnt or resp.total_seasons
-                            resp.seasons = seasons_raw
-                            d['seasons'] = seasons_raw
-                            d['total_episodes'] = resp.total_episodes
-                            d['total_seasons'] = resp.total_seasons
-
-                            import json
-                            await self.db.execute(text("""
-                                UPDATE content 
-                                SET status = COALESCE(:st, status), total_episodes = :ep, total_seasons = :ts, seasons = CAST(:seasons AS JSONB), last_synced_at = now()
-                                WHERE id = :cid
-                            """), {
-                                'st': tmdb_status,
-                                'ep': resp.total_episodes,
-                                'ts': resp.total_seasons,
-                                'seasons': json.dumps(seasons_raw),
-                                'cid': d['id']
-                            })
-                            await self.db.commit()
-                    except Exception as s_sync_err:
-                        logger.warning(f"Failed auto-syncing status/seasons for TMDB {d.get('tmdb_id')}: {s_sync_err}")
-
-            # Fetch TMDB backdrops gallery array
-            if d.get('tmdb_id'):
-                try:
-                    m_type = 'tv' if d.get('content_type') in ['series', 'anime', 'tv'] else 'movie'
-                    raw_tmdb = await self.tmdb_client.get_raw_details(d['tmdb_id'], m_type)
-                    if raw_tmdb:
-                        backdrops_list = self.tmdb_client._extract_backdrops(raw_tmdb)
-                        if backdrops_list:
-                            resp.backdrops = backdrops_list
-                except Exception as b_err:
-                    logger.warning(f"Failed fetching backdrops for TMDB {d.get('tmdb_id')}: {b_err}")
-
             if not resp.backdrops and d.get('backdrop_url'):
                 resp.backdrops = [d['backdrop_url']]
 
-            # 5. Fetch user status if user_id is provided
+            # Save base content to Redis cache
+            try:
+                await cache.set(cache_key, resp.model_dump(), ttl=CacheService.TTL_CONTENT)
+            except Exception as cache_err:
+                logger.warning(f"Failed setting Redis cache for {content_id}: {cache_err}")
+
             if user_id:
-                try:
-                    # 5. Fetch main user status
-                    uid_obj = user_id if isinstance(user_id, UUID) else UUID(user_id)
-                    status_res = await self.db.execute(text('''
-                        SELECT 
-                            s.is_watched, s.is_liked, s.is_dropped, s.is_interested, s.watch_count, s.rating,
-                            s.status, s.progress_episodes, s.rewatch_count, s.last_activity_at,
-                            s.last_watched_season, s.last_watched_episode,
-                            EXISTS (
-                                SELECT 1 FROM calendar_alerts ca
-                                LEFT JOIN content c_ca ON c_ca.id = ca.content_id
-                                LEFT JOIN content c_target ON c_target.id = :cid
-                                WHERE ca.user_id = :uid 
-                                  AND (
-                                    ca.content_id = :cid 
-                                    OR (c_ca.tmdb_id IS NOT NULL AND c_target.tmdb_id IS NOT NULL AND c_ca.tmdb_id = c_target.tmdb_id)
-                                    OR (c_ca.mal_id IS NOT NULL AND c_target.mal_id IS NOT NULL AND c_ca.mal_id = c_target.mal_id)
-                                  )
-                            ) as is_notified
-                        FROM user_content_status s
-                        JOIN content c_s ON c_s.id = s.content_id
-                        LEFT JOIN content c_target ON c_target.id = :cid
-                        WHERE s.user_id = :uid 
-                          AND (
-                            s.content_id = :cid
-                            OR (c_s.tmdb_id IS NOT NULL AND c_target.tmdb_id IS NOT NULL AND c_s.tmdb_id = c_target.tmdb_id)
-                            OR (c_s.mal_id IS NOT NULL AND c_target.mal_id IS NOT NULL AND c_s.mal_id = c_target.mal_id)
-                          )
-                        ORDER BY s.updated_at DESC
-                        LIMIT 1
-                    '''), {'uid': uid_obj, 'cid': d['id']})
-                    row = status_res.mappings().first()
-                    
-                    if row:
-                        resp.is_watched = row['is_watched']
-                        resp.is_liked = row['is_liked']
-                        resp.is_dropped = row['is_dropped']
-                        resp.is_interested = row['is_interested']
-                        resp.is_notified = row['is_notified']
-                        resp.watch_count = row['watch_count']
-                        resp.user_rating = float(row['rating']) if row['rating'] is not None else None
-                        
-                        raw_status = row['status'] or 'none'
-                        resp.status = ContentStatus.COMPLETED if (raw_status == 'none' and row['is_watched']) else ContentStatus(raw_status)
-                        resp.progress_episodes = row['progress_episodes'] or 0
-                        resp.last_watched_season = row['last_watched_season'] or 0
-                        resp.last_watched_episode = row['last_watched_episode'] or 0
-                        resp.rewatch_count = row['rewatch_count'] or 0
-                        resp.last_activity_at = row['last_activity_at']
-                    
-                    # Check for notification even if no status row or if status row is_notified was false
-                    if not resp.is_notified:
-                        ca_res = await self.db.execute(text('''
-                            SELECT EXISTS (
-                                SELECT 1 FROM calendar_alerts ca
-                                LEFT JOIN content c_ca ON c_ca.id = ca.content_id
-                                LEFT JOIN content c_target ON c_target.id = :cid
-                                WHERE ca.user_id = :uid 
-                                  AND (
-                                    ca.content_id = :cid 
-                                    OR (c_ca.tmdb_id IS NOT NULL AND c_target.tmdb_id IS NOT NULL AND c_ca.tmdb_id = c_target.tmdb_id)
-                                    OR (c_ca.mal_id IS NOT NULL AND c_target.mal_id IS NOT NULL AND c_ca.mal_id = c_target.mal_id)
-                                  )
-                            )
-                        '''), {'uid': uid_obj, 'cid': d['id']})
-                        resp.is_notified = ca_res.scalar() or False
-
-                    # 6. Fetch Per-Season Status
-                    logger.info(f"DEBUG_SYNC: uid={user_id}, cid={d['id']}")
-
-                    # Fetch rows normally to be safe
-                    cid_obj = d['id'] if isinstance(d['id'], UUID) else UUID(d['id'])
-                    
-                    raw_rows_res = await self.db.execute(text("""
-                        SELECT s.sn as season_number, 
-                               COALESCE(uss.status, 'none') as status, 
-                               COALESCE(uss.progress_episodes, 0) as progress_episodes,
-                               COALESCE(
-                                   uss.total_episodes,
-                                   (
-                                       SELECT (elem->>'episode_count')::int 
-                                       FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.seasons) = 'array' THEN c.seasons ELSE '[]'::jsonb END) elem 
-                                       WHERE (elem->>'season_number')::int = s.sn 
-                                       LIMIT 1
-                                   ),
-                                   CASE 
-                                       WHEN :total_seasons > 0 THEN ceil(CAST(:total_episodes AS FLOAT) / :total_seasons)::int
-                                       ELSE 0 
-                                   END
-                               ) as total_episodes,
-                               uss.updated_at
-                        FROM (SELECT generate_series(1, COALESCE(:total_seasons, 1)) as sn) s
-                        CROSS JOIN content c
-                        LEFT JOIN user_season_status uss ON uss.content_id = c.id AND uss.user_id = CAST(:uid AS UUID) AND uss.season_number = s.sn
-                        WHERE c.id = CAST(:cid AS UUID)
-                        ORDER BY s.sn ASC
-                    """), {
-                        'uid': uid_obj, 
-                        'cid': cid_obj,
-                        'total_seasons': resp.total_seasons or 1,
-                        'total_episodes': resp.total_episodes or 0
-                    })
-                    
-                    rows = raw_rows_res.fetchall()
-                    logger.info(f"DEBUG_SYNC: Found {len(rows)} status rows for {cid_obj}")
-                    
-                    season_statuses = []
-                    for row in rows:
-                        season_statuses.append(SeasonStatusResponse(
-                            season_number=row[0],
-                            status=row[1],
-                            progress_episodes=row[2],
-                            total_episodes=row[3],
-                            updated_at=row[4]
-                        ))
-                    
-                    resp.season_statuses = season_statuses
-                    
-                    # 7. Fetch Friends Activity
-                    friends_res = await self.db.execute(text("""
-                        SELECT 
-                            p.id as user_id, p.username, p.display_name, p.avatar_url,
-                            ucs.status, ucs.rating,
-                            ucs.progress_episodes, ucs.last_watched_season, ucs.last_watched_episode
-                        FROM friends f
-                        JOIN profiles p ON (f.user_id1 = :uid AND p.id = f.user_id2) OR (f.user_id2 = :uid AND p.id = f.user_id1)
-                        JOIN user_content_status ucs ON ucs.user_id = p.id AND ucs.content_id = :cid
-                        WHERE (ucs.is_watched = true OR ucs.is_interested = true OR ucs.status != 'none')
-                        LIMIT 10
-                    """), {'uid': uid_obj, 'cid': cid_obj})
-                    
-                    from app.models.content import FriendActivityResponse
-                    resp.friends_activity = [
-                        FriendActivityResponse(
-                            user_id=r['user_id'],
-                            username=r['username'],
-                            display_name=r['display_name'],
-                            avatar_url=r['avatar_url'],
-                            status=r['status'],
-                            rating=float(r['rating']) if r['rating'] is not None else None,
-                            progress_episodes=r['progress_episodes'] or 0,
-                            last_watched_season=r['last_watched_season'] or 0,
-                            last_watched_episode=r['last_watched_episode'] or 0
-                        ) for r in friends_res.mappings()
-                    ]
-
-                    # 8. Fetch User Reviews & Watch History
-                    rev_all_res = await self.db.execute(text("""
-                        SELECT id, rating, star_rating, text_review, is_spoiler, contains_spoiler, created_at, watch_history_id
-                        FROM reviews
-                        WHERE user_id = :uid AND content_id = :cid AND (is_deleted = false OR is_deleted IS NULL)
-                        ORDER BY created_at ASC
-                    """), {'uid': uid_obj, 'cid': cid_obj})
-                    all_reviews = rev_all_res.mappings().all()
-                    
-                    if all_reviews:
-                        latest_rev = all_reviews[-1]
-                        resp.review_text = latest_rev['text_review']
-                        resp.user_review = {
-                            'id': str(latest_rev['id']),
-                            'text_review': latest_rev['text_review'],
-                            'rating': latest_rev['rating'] or latest_rev['star_rating'],
-                            'created_at': latest_rev['created_at'].isoformat() if latest_rev['created_at'] else None,
-                        }
-
-                    wh_res = await self.db.execute(text("""
-                        SELECT wh.id, wh.watch_type, wh.watched_at, wh.rating, wh.review_id
-                        FROM watch_history wh
-                        WHERE wh.user_id = :uid AND wh.content_id = :cid
-                        ORDER BY wh.watched_at ASC
-                    """), {'uid': uid_obj, 'cid': cid_obj})
-                    history_rows = wh_res.mappings().all()
-                    history_list = [dict(r) for r in history_rows]
-
-                    # Collect all unique entries (combining watch_history table and reviews table)
-                    combined_entries = []
-                    processed_rev_ids = set()
-
-                    # 1. Add all watch_history entries
-                    for wh in history_rows:
-                        wid = str(wh['id'])
-                        matching_rev = None
-                        
-                        if wh.get('review_id'):
-                            matching_rev = next((r for r in all_reviews if str(r['id']) == str(wh['review_id'])), None)
-                        if not matching_rev:
-                            matching_rev = next((r for r in all_reviews if str(r.get('watch_history_id')) == wid), None)
-                        if not matching_rev and len(history_rows) == 1 and all_reviews:
-                            matching_rev = all_reviews[0]
-
-                        if matching_rev:
-                            processed_rev_ids.add(str(matching_rev['id']))
-
-                        wh_rating = float(wh['rating']) if wh.get('rating') is not None else None
-                        if wh_rating is None and matching_rev:
-                            rev_r = matching_rev.get('rating') or matching_rev.get('star_rating')
-                            wh_rating = float(rev_r) if rev_r is not None else None
-
-                        combined_entries.append({
-                            'id': wid,
-                            'watched_at': wh['watched_at'],
-                            'rating': wh_rating if wh_rating is not None else resp.user_rating,
-                            'review': matching_rev['text_review'] if matching_rev else None,
-                            'watch_type': wh.get('watch_type', 'first_watch')
-                        })
-
-                    # 2. Add any remaining orphan reviews that don't match any watch_history entry
-                    for rev in all_reviews:
-                        rid = str(rev['id'])
-                        if rid not in processed_rev_ids:
-                            rev_r = rev.get('rating') or rev.get('star_rating')
-                            combined_entries.append({
-                                'id': rid,
-                                'watched_at': rev['created_at'],
-                                'rating': float(rev_r) if rev_r is not None else resp.user_rating,
-                                'review': rev['text_review'],
-                                'watch_type': 'first_watch' if len(combined_entries) == 0 else 'rewatch'
-                            })
-
-                    # 3. Sort combined entries chronologically ASC
-                    combined_entries.sort(key=lambda x: x['watched_at'] or datetime.min.replace(tzinfo=timezone.utc))
-
-                    resp.watch_history = []
-                    for idx, item in enumerate(combined_entries):
-                        w_type = 'first_watch' if idx == 0 else 'rewatch'
-
-                        resp.watch_history.append({
-                            'id': item['id'],
-                            'watch_type': w_type,
-                            'watched_at': item['watched_at'].isoformat() if hasattr(item['watched_at'], 'isoformat') else (str(item['watched_at']) if item['watched_at'] else None),
-                            'rating': item['rating'],
-                            'review': item['review'],
-                            'watch_number': idx + 1
-                        })
-
-                except Exception as status_err:
-                    logger.error(f"Error fetching user status for {content_id}: {status_err}")
-                    try:
-                        await self.db.rollback()
-                    except Exception: pass
+                await self._attach_user_status_to_response(resp, user_id, resp.id)
 
             return resp
         except Exception as e:
@@ -2575,6 +2396,13 @@ class ContentService:
 
     async def get_content_credits(self, content_id: str) -> List[Dict[str, Any]]:
         """Fetch cast and crew, using local DB if available, otherwise fallback to TMDB."""
+        cache_key = CacheKeys.credits(content_id)
+        try:
+            cached = await cache.get(cache_key)
+            if cached is not None and isinstance(cached, list):
+                return cached
+        except Exception: pass
+
         try:
             # 1. Resolve content meta quickly without heavy social joins
             meta = await self._resolve_meta(content_id)
@@ -2598,6 +2426,8 @@ class ContentService:
                     p_url = r.get('profile_url')
                     if p_url and not p_url.startswith('http'):
                         r['profile_url'] = f"https://image.tmdb.org/t/p/w500{p_url}"
+                try: await cache.set(cache_key, rows, ttl=CacheService.TTL_CONTENT)
+                except Exception: pass
                 return rows
 
             # 3. If no local credits, fetch from TMDB
@@ -2655,6 +2485,8 @@ class ContentService:
             
             # 5. Commit everything at once
             await self.db.commit()
+            try: await cache.set(cache_key, all_credits, ttl=CacheService.TTL_CONTENT)
+            except Exception: pass
             return all_credits
         except Exception as e:
             await self.db.rollback()
@@ -2687,6 +2519,13 @@ class ContentService:
 
     async def get_similar_content(self, content_id: str) -> List[Dict[str, Any]]:
         """Fetch similar content from TMDB and upsert basic info."""
+        cache_key = CacheKeys.similar(content_id)
+        try:
+            cached = await cache.get(cache_key)
+            if cached is not None and isinstance(cached, list):
+                return cached
+        except Exception: pass
+
         try:
             meta = await self._resolve_meta(content_id)
             if not meta or not meta.get('tmdb_id'): return []
@@ -2696,7 +2535,10 @@ class ContentService:
 
             # Limit to 10 items as requested
             upserted = await self._upsert_tmdb_content(similar_data[:10], is_permanent=False)
-            return self._map_to_response(upserted)
+            res = self._map_to_response(upserted)
+            try: await cache.set(cache_key, res, ttl=CacheService.TTL_CONTENT)
+            except Exception: pass
+            return res
         except Exception as e:
             await self.db.rollback()
             logger.error(f"Error getting similar for {content_id}: {e}")
@@ -2843,43 +2685,146 @@ class ContentService:
         if not uuids and not tmdb_ids and not mal_ids: return
 
         uid_obj = UUID(user_id) if isinstance(user_id, str) else user_id
-
-        res = await self.db.execute(text('''
-            SELECT 
-                c.id as content_id,
-                c.tmdb_id,
-                c.mal_id,
-                COALESCE(ucs.is_watched, false) as is_watched,
-                COALESCE(ucs.is_liked, false) as is_liked,
-                COALESCE(ucs.is_dropped, false) as is_dropped,
-                COALESCE(ucs.is_interested, false) as is_interested,
-                COALESCE(ucs.watch_count, 0) as watch_count,
-                ucs.rating as user_rating,
-                ucs.status,
-                ucs.progress_episodes,
-                ucs.rewatch_count,
-                ucs.last_activity_at,
-                false as is_notified
-            FROM content c
-            JOIN user_content_status ucs ON ucs.content_id = c.id AND ucs.user_id = :uid
-        '''), {'uid': uid_obj})
+        user_id_str = str(uid_obj)
+        status_cache_key = f"u_status:{user_id_str}"
         
-        status_rows = res.mappings().fetchall()
-        uuid_map = {str(r['content_id']): r for r in status_rows}
-        tmdb_map = {r['tmdb_id']: r for r in status_rows if r['tmdb_id'] is not None}
-        mal_map = {r['mal_id']: r for r in status_rows if r['mal_id'] is not None}
+        cached_status_data = await cache.get(status_cache_key)
+        if cached_status_data is not None:
+            status_rows = cached_status_data.get('status_rows', [])
+            user_ca_rows = cached_status_data.get('ca_rows', [])
+            friends_map = cached_status_data.get('friends_map', {})
+        else:
+            where_clauses = ["ucs.user_id = :uid"]
+            params = {'uid': uid_obj}
+            item_conds = []
+            if uuids:
+                item_conds.append("c.id = ANY(:uuids)")
+                params['uuids'] = uuids
+            if tmdb_ids:
+                item_conds.append("c.tmdb_id = ANY(:tmdb_ids)")
+                params['tmdb_ids'] = tmdb_ids
+            if mal_ids:
+                item_conds.append("c.mal_id = ANY(:mal_ids)")
+                params['mal_ids'] = mal_ids
+            
+            if item_conds:
+                where_clauses.append(f"({' OR '.join(item_conds)})")
 
-        # Fetch all user calendar_alerts with tmdb_id / mal_id for ultimate fallback
-        ca_res = await self.db.execute(text('''
-            SELECT ca.content_id, c.tmdb_id, c.mal_id
-            FROM calendar_alerts ca
-            LEFT JOIN content c ON c.id = ca.content_id
-            WHERE ca.user_id = :uid
-        '''), {'uid': uid_obj})
-        user_ca_rows = ca_res.mappings().fetchall()
-        notified_cids = {str(r['content_id']) for r in user_ca_rows if r['content_id']}
-        notified_tids = {r['tmdb_id'] for r in user_ca_rows if r['tmdb_id'] is not None}
-        notified_mids = {r['mal_id'] for r in user_ca_rows if r['mal_id'] is not None}
+            where_sql = " AND ".join(where_clauses)
+
+            ca_where_clauses = ["ca.user_id = :uid"]
+            ca_params = {'uid': uid_obj}
+            ca_item_conds = []
+            if uuids:
+                ca_item_conds.append("ca.content_id = ANY(:uuids)")
+                ca_params['uuids'] = uuids
+            if tmdb_ids:
+                ca_item_conds.append("c.tmdb_id = ANY(:tmdb_ids)")
+                ca_params['tmdb_ids'] = tmdb_ids
+            if mal_ids:
+                ca_item_conds.append("c.mal_id = ANY(:mal_ids)")
+                ca_params['mal_ids'] = mal_ids
+
+            if ca_item_conds:
+                ca_where_clauses.append(f"({' OR '.join(ca_item_conds)})")
+
+            ca_where_sql = " AND ".join(ca_where_clauses)
+
+            q1 = self.db.execute(text(f'''
+                SELECT 
+                    c.id as content_id,
+                    c.tmdb_id,
+                    c.mal_id,
+                    COALESCE(ucs.is_watched, false) as is_watched,
+                    COALESCE(ucs.is_liked, false) as is_liked,
+                    COALESCE(ucs.is_dropped, false) as is_dropped,
+                    COALESCE(ucs.is_interested, false) as is_interested,
+                    COALESCE(ucs.watch_count, 0) as watch_count,
+                    ucs.rating as user_rating,
+                    ucs.status,
+                    ucs.progress_episodes,
+                    ucs.rewatch_count,
+                    ucs.last_activity_at,
+                    false as is_notified
+                FROM content c
+                JOIN user_content_status ucs ON ucs.content_id = c.id
+                WHERE {where_sql}
+            '''), params)
+
+            q2 = self.db.execute(text(f'''
+                SELECT ca.content_id, c.tmdb_id, c.mal_id
+                FROM calendar_alerts ca
+                LEFT JOIN content c ON c.id = ca.content_id
+                WHERE {ca_where_sql}
+            '''), ca_params)
+
+            if uuids:
+                q3 = self.db.execute(text("""
+                    SELECT 
+                        ucs.content_id,
+                        p.id as user_id, p.username, p.display_name, p.avatar_url,
+                        ucs.status, ucs.rating,
+                        ucs.progress_episodes, ucs.last_watched_season, ucs.last_watched_episode
+                    FROM friends f
+                    JOIN profiles p ON (f.user_id1 = :uid AND p.id = f.user_id2) OR (f.user_id2 = :uid AND p.id = f.user_id1)
+                    JOIN user_content_status ucs ON ucs.user_id = p.id
+                    WHERE ucs.content_id = ANY(CAST(:cids AS UUID[]))
+                      AND (ucs.is_watched = true OR ucs.is_interested = true OR ucs.status != 'none')
+                    LIMIT 50
+                """), {'uid': uid_obj, 'cids': uuids})
+                res1, res2, res3 = await asyncio.gather(q1, q2, q3)
+                raw_friends_rows = res3.mappings().fetchall()
+            else:
+                res1, res2 = await asyncio.gather(q1, q2)
+                raw_friends_rows = []
+
+            raw_status_rows = res1.mappings().fetchall()
+            raw_ca_rows = res2.mappings().fetchall()
+
+            status_rows = [dict(r) for r in raw_status_rows]
+            user_ca_rows = [dict(r) for r in raw_ca_rows]
+
+            from collections import defaultdict
+            friends_map_builder = defaultdict(list)
+            for r in raw_friends_rows:
+                friends_map_builder[str(r['content_id'])].append({
+                    'user_id': str(r['user_id']),
+                    'username': r['username'],
+                    'display_name': r['display_name'],
+                    'avatar_url': r['avatar_url'],
+                    'status': str(r['status']) if r['status'] else 'none',
+                    'rating': float(r['rating']) if r['rating'] is not None else None,
+                    'progress_episodes': r['progress_episodes'] or 0,
+                    'last_watched_season': r['last_watched_season'] or 0,
+                    'last_watched_episode': r['last_watched_episode'] or 0
+                })
+            friends_map = dict(friends_map_builder)
+
+            # Convert UUIDs/dates to strings for Redis serialization
+            for r in status_rows:
+                if r.get('content_id'): r['content_id'] = str(r['content_id'])
+                if r.get('last_activity_at'): r['last_activity_at'] = str(r['last_activity_at'])
+                if r.get('status') is not None: r['status'] = str(r['status'])
+            for r in user_ca_rows:
+                if r.get('content_id'): r['content_id'] = str(r['content_id'])
+
+            await cache.set(status_cache_key, {
+                'status_rows': status_rows,
+                'ca_rows': user_ca_rows,
+                'friends_map': friends_map
+            }, ttl=300)
+
+        uuid_map = {str(r['content_id']): r for r in status_rows if r.get('content_id')}
+        tmdb_map = {r['tmdb_id']: r for r in status_rows if r.get('tmdb_id') is not None}
+        mal_map = {r['mal_id']: r for r in status_rows if r.get('mal_id') is not None}
+
+        notified_cids = {str(r['content_id']) for r in user_ca_rows if r.get('content_id')}
+        notified_tids = {r['tmdb_id'] for r in user_ca_rows if r.get('tmdb_id') is not None}
+        notified_mids = {r['mal_id'] for r in user_ca_rows if r.get('mal_id') is not None}
+
+        def set_val(obj, key, val):
+            if isinstance(obj, dict): obj[key] = val
+            else: setattr(obj, key, val)
 
         for it in items:
             cid = str(it.get('id', '')) if isinstance(it, dict) else str(getattr(it, 'id', ''))
@@ -2889,6 +2834,8 @@ class ContentService:
             if cid.startswith('tmdb_') and cid[5:].isdigit(): tid = int(cid[5:])
             elif cid.startswith('mal_') and cid[4:].isdigit(): mid = int(cid[4:])
             elif cid.isdigit(): tid = int(cid)
+
+            set_val(it, 'friends_activity', friends_map.get(cid, []))
 
             status = uuid_map.get(cid)
             if not status and tid is not None:
@@ -2900,10 +2847,6 @@ class ContentService:
 
             if not status:
                 continue
-            
-            def set_val(obj, key, val):
-                if isinstance(obj, dict): obj[key] = val
-                else: setattr(obj, key, val)
 
             set_val(it, 'is_watched', status.get('is_watched') or False)
             set_val(it, 'is_liked', status.get('is_liked') or False)
@@ -2919,8 +2862,6 @@ class ContentService:
             set_val(it, 'is_notified', is_notified)
             set_val(it, 'watch_count', status.get('watch_count') or 0)
             
-            # New Tracking Fields
-            # Fallback to 'completed' if is_watched is true (legacy sync)
             raw_status = status.get('status') or 'none'
             if raw_status == 'none' and (status.get('is_watched') or False):
                 raw_status = 'completed'
@@ -2933,44 +2874,6 @@ class ContentService:
             # Explicitly cast to float to avoid Decimal-as-string issues in JSON
             val = status.get('rating')
             set_val(it, 'user_rating', float(val) if val is not None else None)
-
-        # Batch Fetch Friends Activity
-        if user_id:
-            try:
-                friends_act_res = await self.db.execute(text("""
-                    SELECT 
-                        ucs.content_id,
-                        p.id as user_id, p.username, p.display_name, p.avatar_url,
-                        ucs.status, ucs.rating,
-                        ucs.progress_episodes, ucs.last_watched_season, ucs.last_watched_episode
-                    FROM friends f
-                    JOIN profiles p ON (f.user_id1 = :uid AND p.id = f.user_id2) OR (f.user_id2 = :uid AND p.id = f.user_id1)
-                    JOIN user_content_status ucs ON ucs.user_id = p.id
-                    WHERE ucs.content_id = ANY(CAST(:cids AS UUID[]))
-                      AND (ucs.is_watched = true OR ucs.is_interested = true OR ucs.status != 'none')
-                    LIMIT 50
-                """), {'uid': uid_obj, 'cids': uuids})
-                
-                from collections import defaultdict
-                friends_map = defaultdict(list)
-                for r in friends_act_res.mappings():
-                    friends_map[str(r['content_id'])].append({
-                        'user_id': str(r['user_id']),
-                        'username': r['username'],
-                        'display_name': r['display_name'],
-                        'avatar_url': r['avatar_url'],
-                        'status': r['status'],
-                        'rating': float(r['rating']) if r['rating'] is not None else None,
-                        'progress_episodes': r['progress_episodes'] or 0,
-                        'last_watched_season': r['last_watched_season'] or 0,
-                        'last_watched_episode': r['last_watched_episode'] or 0
-                    })
-                
-                for it in items:
-                    cid = str(it.get('id', '')) if isinstance(it, dict) else str(getattr(it, 'id', ''))
-                    set_val(it, 'friends_activity', friends_map.get(cid, []))
-            except Exception as e:
-                logger.error(f"Error populating friends activity in batch: {e}")
 
     async def ensure_content_persisted(self, content_id: Union[str, UUID]) -> UUID:
         """Guarantees that a row for content_id exists in table `content` before foreign key insertion."""
