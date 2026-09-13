@@ -49,11 +49,16 @@ class ChatService:
                    p.avatar_url as other_avatar_url, p.bio as other_bio
             FROM conversations c
             JOIN conversation_members cm ON cm.conversation_id = c.id
-            LEFT JOIN messages m ON m.id = c.last_message_id
+            LEFT JOIN LATERAL (
+                SELECT * FROM messages m_sub
+                WHERE m_sub.conversation_id = c.id
+                ORDER BY m_sub.sent_at DESC
+                LIMIT 1
+            ) m ON true
             LEFT JOIN conversation_members cm_other ON cm_other.conversation_id = c.id AND cm_other.user_id != :uid AND c.conversation_type = 'direct'
             LEFT JOIN profiles p ON p.id = cm_other.user_id
             WHERE cm.user_id = :uid
-            ORDER BY c.last_message_at DESC NULLS LAST
+            ORDER BY COALESCE(m.sent_at, c.last_message_at, c.updated_at) DESC NULLS LAST
         '''), {'uid': uid_obj})
         
         conversations = []
@@ -360,15 +365,49 @@ class ChatService:
         return msg
 
     async def delete_message(self, user_id: str, message_id: str) -> bool:
-        """Deletes a message if the sender matches the user_id."""
+        """Deletes a message if the sender matches the user_id and updates conversation pointers."""
+        uid_obj = UUID(user_id) if isinstance(user_id, str) else user_id
+        mid_obj = UUID(message_id) if isinstance(message_id, str) else message_id
+
+        # 1. Fetch conversation_id before deletion
         res = await self.db.execute(text('''
+            SELECT conversation_id FROM messages 
+            WHERE id = :mid AND sender_id = :uid
+        '''), {'mid': mid_obj, 'uid': uid_obj})
+        row = res.mappings().one_or_none()
+        if not row:
+            raise ValueError("Message not found or you don't have permission to delete it")
+        
+        cid = row['conversation_id']
+
+        # 2. Delete the target message
+        await self.db.execute(text('''
             DELETE FROM messages 
             WHERE id = :mid AND sender_id = :uid
-        '''), {'mid': message_id, 'uid': user_id})
-        
-        if res.rowcount == 0:
-            raise ValueError("Message not found or you don't have permission to delete it")
-            
+        '''), {'mid': mid_obj, 'uid': uid_obj})
+
+        # 3. Auto-repair conversation's last_message_id and last_message_at
+        latest_res = await self.db.execute(text('''
+            SELECT id, sent_at FROM messages
+            WHERE conversation_id = :cid
+            ORDER BY sent_at DESC
+            LIMIT 1
+        '''), {'cid': cid})
+        latest = latest_res.mappings().one_or_none()
+
+        if latest:
+            await self.db.execute(text('''
+                UPDATE conversations
+                SET last_message_id = :mid, last_message_at = :sent_at, updated_at = now()
+                WHERE id = :cid
+            '''), {'mid': latest['id'], 'sent_at': latest['sent_at'], 'cid': cid})
+        else:
+            await self.db.execute(text('''
+                UPDATE conversations
+                SET last_message_id = NULL, last_message_at = NULL, updated_at = now()
+                WHERE id = :cid
+            '''), {'cid': cid})
+
         await self.db.commit()
         return True
 
