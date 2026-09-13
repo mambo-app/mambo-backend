@@ -84,7 +84,7 @@ class LetterboxdService:
         if scrapingant_key:
             import requests
             try:
-                params = {"x-api-key": scrapingant_key, "url": url}
+                params = {"x-api-key": scrapingant_key, "url": url, "browser": "false", "proxy_type": "residential"}
                 resp = requests.get("https://api.scrapingant.com/v2/general", params=params, timeout=5)
                 if resp.status_code == 200 and resp.text:
                     logger.info(f"Scrape succeeded via ScrapingAnt for {url}")
@@ -601,17 +601,19 @@ class LetterboxdService:
                         rating = float(rating_val * 2)
 
                     wh_id = None
+                    watched_at = film.get("watch_date") or date.today()
+                    if isinstance(watched_at, str):
+                        try:
+                            watched_at = datetime.strptime(watched_at, "%Y-%m-%d").date()
+                        except Exception:
+                            watched_at = date.today()
+                    watched_at_dt = datetime.combine(watched_at, datetime.min.time()) if isinstance(watched_at, date) else datetime.now()
+
                     if wh_row:
                         wh_id = wh_row[0]
                         sync_progress[user_id]["skipped_count"] += 1
                     else:
                         wh_id = uuid.uuid4()
-                        watched_at = film.get("watch_date") or date.today()
-                        if isinstance(watched_at, str):
-                            try:
-                                watched_at = datetime.strptime(watched_at, "%Y-%m-%d").date()
-                            except Exception:
-                                watched_at = date.today()
                         await self.db.execute(text("""
                             INSERT INTO public.watch_history (id, user_id, content_id, watched_at, watch_type, rating, imported_from)
                             VALUES (:id, :uid, :cid, :wat, 'first_watch', :rating, 'letterboxd')
@@ -673,10 +675,11 @@ class LetterboxdService:
                                 rating = COALESCE(rating, :rating),
                                 is_liked = :is_liked,
                                 progress_episodes = CASE WHEN :type IN ('series', 'anime') THEN :ep ELSE progress_episodes END,
-                                last_watched_at = COALESCE(last_watched_at, now()), 
-                                last_activity_at = now()
+                                first_watched_at = COALESCE(first_watched_at, :wat_dt),
+                                last_watched_at = COALESCE(:wat_dt, last_watched_at, now()), 
+                                last_activity_at = COALESCE(:wat_dt, last_activity_at, now())
                             WHERE id = :id
-                        """), {"id": ucs_row[0], "rating": rating, "is_liked": is_liked, "type": content_type, "ep": total_episodes})
+                        """), {"id": ucs_row[0], "rating": rating, "is_liked": is_liked, "type": content_type, "ep": total_episodes, "wat_dt": watched_at_dt})
                     else:
                         await self.db.execute(text("""
                             INSERT INTO public.user_content_status (
@@ -684,9 +687,9 @@ class LetterboxdService:
                                 progress_episodes, first_watched_at, last_watched_at, created_at, updated_at, last_activity_at, imported_from
                             ) VALUES (
                                 gen_random_uuid(), :uid, :cid, true, :is_liked, 'completed', 1, :rating, 
-                                :ep, now(), now(), now(), now(), now(), 'letterboxd'
+                                :ep, :wat_dt, :wat_dt, :wat_dt, now(), :wat_dt, 'letterboxd'
                             )
-                        """), {"uid": user_uuid, "cid": content_id, "is_liked": is_liked, "rating": rating, "ep": total_episodes if content_type in ("series", "anime") else 0})
+                        """), {"uid": user_uuid, "cid": content_id, "is_liked": is_liked, "rating": rating, "ep": total_episodes if content_type in ("series", "anime") else 0, "wat_dt": watched_at_dt})
 
                     # E. Add to Watched collection
                     await self.db.execute(text("""
@@ -716,6 +719,45 @@ class LetterboxdService:
                     await self.db.rollback()
 
                 sync_progress[user_id]["processed"] += 1
+
+            # 3.5 Process standalone reviews (if any review exists for a title not in films list)
+            for r_slug, r_item in reviews_map.items():
+                if sync_progress.get(user_id, {}).get("cancelled"):
+                    return
+                meta = slug_to_meta.get(r_slug, {})
+                c_info = resolved_map.get(r_slug) or db_content_map.get(meta.get("clean_title", "").lower())
+                if c_info:
+                    cid = c_info["id"]
+                    if cid not in processed_reviews_cids:
+                        try:
+                            res = await self.db.execute(text(
+                                "SELECT id FROM public.reviews WHERE user_id = :uid AND content_id = :cid LIMIT 1"
+                            ), {"uid": user_uuid, "cid": cid})
+                            if not res.fetchone():
+                                processed_reviews_cids.add(cid)
+                                review_id = uuid.uuid4()
+                                text_review = r_item.get("review_text")
+                                rating_val = r_item.get("rating")
+                                star_rating = int(rating_val * 2) if rating_val and rating_val > 0 else None
+                                rating = float(rating_val * 2) if rating_val and rating_val > 0 else None
+                                review_date = r_item.get("watch_date") or date.today()
+                                review_dt = datetime.combine(review_date, datetime.min.time()) if isinstance(review_date, date) else datetime.now()
+                                await self.db.execute(text("""
+                                    INSERT INTO public.reviews (
+                                        id, user_id, content_id, rating, star_rating, text_review, contains_spoiler, is_spoiler, created_at, updated_at, imported_from
+                                    ) VALUES (
+                                        :id, :uid, :cid, :rating, :star_rating, :text_review, false, false, :cat, :uat, 'letterboxd'
+                                    )
+                                """), {
+                                    "id": review_id, "uid": user_uuid, "cid": cid, "rating": rating,
+                                    "star_rating": star_rating, "text_review": text_review,
+                                    "cat": review_dt, "uat": review_dt
+                                })
+                                await self.db.commit()
+                                sync_progress[user_id]["imported_reviews"] += 1
+                        except Exception as rev_err:
+                            logger.error(f"Error importing standalone review {r_slug} for user {user_id}: {rev_err}")
+                            await self.db.rollback()
 
             # 4. Process Watchlist
             for item in watchlist:
@@ -1001,7 +1043,80 @@ class LetterboxdService:
                 sync_progress[user_id]["current_item"] = "Fetching watched films list..."
                 films = []
                 reviews = []
-                for p in range(1, 25): # fetch up to 25 pages (~1800 items)
+                seen_diary_slugs = set()
+
+                # 1. Fetch Diary entries (exact watch dates)
+                check_cancelled()
+                sync_progress[user_id]["current_item"] = "Fetching Letterboxd diary entries..."
+                p = 1
+                while True:
+                    check_cancelled()
+                    try:
+                        html = self._fetch_url(f"https://letterboxd.com/{username}/diary/page/{p}/")
+                        if not html:
+                            break
+                        soup = BeautifulSoup(html, "html.parser")
+                        rows = soup.select("tr.diary-entry-row, tr.entry-row, tr.diary-entry, table.diary-table tbody tr")
+                        if not rows:
+                            break
+                        
+                        items_in_page = 0
+                        for row in rows:
+                            poster = row.select_one("div.film-poster, div[data-film-slug]")
+                            slug = None
+                            if poster:
+                                slug = poster.get("data-film-slug") or poster.get("data-item-slug")
+                            if not slug:
+                                film_link = row.select_one("td.td-film-details a[href*='/film/'], a[href*='/film/']")
+                                if film_link and film_link.get("href"):
+                                    href = film_link.get("href", "")
+                                    slug = href.split("/film/")[-1].strip("/")
+                                    if "/" in slug:
+                                        slug = slug.split("/")[0]
+                            if not slug:
+                                continue
+                            
+                            rating_span = row.select_one("td.td-rating span.rating, span.rating")
+                            rating = self.parse_stars(rating_span.get_text()) if rating_span else None
+                            
+                            watch_date = None
+                            for a in row.select("a[href*='/diary/']"):
+                                href = a.get("href", "")
+                                match = re.search(r'/diary(?:/films)?/for/(\d{4})/(\d{2})/(\d{2})/', href)
+                                if match:
+                                    y, m, d = match.groups()
+                                    watch_date = date(int(y), int(m), int(d))
+                                    break
+                            if not watch_date:
+                                time_tag = row.select_one("time[datetime], time")
+                                if time_tag:
+                                    dt_str = time_tag.get("datetime") or time_tag.get_text()
+                                    if dt_str:
+                                        try:
+                                            watch_date = datetime.strptime(dt_str.split("T")[0], "%Y-%m-%d").date()
+                                        except Exception:
+                                            pass
+
+                            films.append({
+                                "slug": slug,
+                                "rating": rating,
+                                "watch_date": watch_date
+                            })
+                            seen_diary_slugs.add(slug)
+                            items_in_page += 1
+
+                        if items_in_page == 0 or not soup.select_one("a.next"):
+                            break
+                        p += 1
+                    except Exception as diary_err:
+                        logger.warning(f"Error scraping diary page {p}: {diary_err}")
+                        break
+
+                # 2. Fetch Watched films grid (all pages)
+                check_cancelled()
+                sync_progress[user_id]["current_item"] = "Fetching watched films list..."
+                p = 1
+                while True:
                     check_cancelled()
                     try:
                         html = self._fetch_url(f"https://letterboxd.com/{username}/films/page/{p}/")
@@ -1011,16 +1126,22 @@ class LetterboxdService:
                         items = []
                         for div in soup.find_all(attrs={"data-item-slug": True}):
                             slug = div.get("data-item-slug", "").strip()
+                            if not slug:
+                                continue
                             li = div.find_parent("li")
                             rating_span = li.select_one("span.rating") if li else None
                             rating = self.parse_stars(rating_span.get_text()) if rating_span else None
-                            items.append({"slug": slug, "rating": rating})
-                        if not items:
+                            if slug not in seen_diary_slugs:
+                                items.append({"slug": slug, "rating": rating, "watch_date": None})
+                                seen_diary_slugs.add(slug)
+                        if not items and p > 1:
                             break
                         films.extend(items)
                         if not soup.select_one("a.next"):
                             break
-                    except Exception:
+                        p += 1
+                    except Exception as films_err:
+                        logger.warning(f"Error scraping films page {p}: {films_err}")
                         break
 
                 # RSS Fallback if HTML scraping returned 0 items
