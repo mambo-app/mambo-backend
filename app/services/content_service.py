@@ -170,6 +170,12 @@ class ContentService:
                 safe_dict['id'] = str(safe_dict['id'])
                 safe_dict['description'] = safe_dict.get('synopsis')
                 
+                logo_val = d.get('title_logo_url') or d.get('logo_url') or d.get('title_logo') or safe_dict.get('title_logo_url') or safe_dict.get('logo_url') or safe_dict.get('title_logo')
+                if logo_val:
+                    safe_dict['title_logo_url'] = logo_val
+                    safe_dict['logo_url'] = logo_val
+                    safe_dict['title_logo'] = logo_val
+                
                 # 4. Distribution and Counts
                 safe_dict['vote_count'] = d.get('vote_count') or 0
                 safe_dict['rating_distribution'] = self._calculate_distribution(d['avg_star_rating'])
@@ -328,6 +334,30 @@ class ContentService:
 
         # Resolve TMDB/MAL IDs to real DB UUIDs so Flutter gets stable, correct IDs
         await self._resolve_items_to_db_uuids(all_items)
+
+        # Concurrently fetch PNG title logos for top items in each category
+        async def _fetch_logo_for_item(item: dict):
+            if not isinstance(item, dict): return
+            if item.get('title_logo_url') or item.get('logo_url') or item.get('title_logo'):
+                return
+            tmdb_id = item.get('tmdb_id')
+            c_type = item.get('content_type') or 'movie'
+            if tmdb_id:
+                try:
+                    logo = await asyncio.wait_for(self.tmdb_client.get_title_logo(int(tmdb_id), c_type), timeout=2.5)
+                    if logo:
+                        item['title_logo_url'] = logo
+                        item['logo_url'] = logo
+                        item['title_logo'] = logo
+                except Exception:
+                    pass
+
+        logo_tasks = [_fetch_logo_for_item(it) for it in (m_list[:10] + s_list[:10]) if isinstance(it, dict)]
+        if logo_tasks:
+            try:
+                await asyncio.gather(*logo_tasks, return_exceptions=True)
+            except Exception:
+                pass
 
         resp = HomeTrendingResponse(
             movies=self._map_to_response(m_list),

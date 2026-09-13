@@ -56,6 +56,7 @@ class ContentResponse(BaseModel):
     backdrops: List[str] = []
     logo_url: Optional[str] = None
     title_logo: Optional[str] = None
+    title_logo_url: Optional[str] = None
     genres: List[str] = []
     release_status: Optional[str] = None
     release_date: Optional[Union[date, str]] = None

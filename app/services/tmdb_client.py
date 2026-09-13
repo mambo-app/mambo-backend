@@ -842,6 +842,8 @@ class TMDBClient:
                 en_logo = next((l for l in logos if isinstance(l, dict) and l.get("iso_639_1") == "en"), logos[0])
                 if isinstance(en_logo, dict):
                     fp = en_logo.get("file_path")
+                    if fp:
+                        return f"{self.IMAGE_BASE}{fp}"
         return None
 
     def _extract_backdrops(self, item: dict) -> list:
