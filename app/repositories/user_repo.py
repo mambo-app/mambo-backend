@@ -73,10 +73,10 @@ class UserRepository(BaseRepository):
             RETURNING *
         ''', fields)
 
-    async def search(self, query: str, limit: int, offset: int) -> list[dict]:
+    async def search(self, query: str, limit: int, offset: int, viewer_id: Optional[str] = None) -> list[dict]:
         clean_q = query.strip().lstrip('@')
         like_p = f"{clean_q}%"
-        return await self.fetch_many('''
+        sql = '''
             SELECT id, username, display_name, avatar_url, is_verified
             FROM profiles
             WHERE (
@@ -85,22 +85,44 @@ class UserRepository(BaseRepository):
                 OR search_vector @@ plainto_tsquery('simple', :query)
             )
             AND is_deleted = false
+        '''
+        params: dict[str, Any] = {'query': clean_q, 'like_p': like_p, 'limit': limit, 'offset': offset}
+        if viewer_id:
+            sql += '''
+                AND id NOT IN (SELECT blocked_id FROM blocked_users WHERE blocker_id = CAST(:vid AS UUID))
+                AND id NOT IN (SELECT blocker_id FROM blocked_users WHERE blocked_id = CAST(:vid AS UUID))
+            '''
+            params['vid'] = viewer_id
+
+        sql += '''
             ORDER BY 
                 CASE WHEN username ILIKE :like_p THEN 0 ELSE 1 END,
                 username ASC
             LIMIT :limit OFFSET :offset
-        ''', {'query': clean_q, 'like_p': like_p, 'limit': limit, 'offset': offset})
+        '''
+        return await self.fetch_many(sql, params)
 
-    async def search_by_username_prefix(self, prefix: str, limit: int) -> list[dict]:
+    async def search_by_username_prefix(self, prefix: str, limit: int, viewer_id: Optional[str] = None) -> list[dict]:
         clean_p = prefix.strip().lstrip('@')
-        return await self.fetch_many('''
+        sql = '''
             SELECT id, username, display_name, avatar_url, is_verified
             FROM profiles
             WHERE (username ILIKE :prefix OR display_name ILIKE :prefix)
             AND is_deleted = false
+        '''
+        params: dict[str, Any] = {'prefix': f'{clean_p}%', 'limit': limit}
+        if viewer_id:
+            sql += '''
+                AND id NOT IN (SELECT blocked_id FROM blocked_users WHERE blocker_id = CAST(:vid AS UUID))
+                AND id NOT IN (SELECT blocker_id FROM blocked_users WHERE blocked_id = CAST(:vid AS UUID))
+            '''
+            params['vid'] = viewer_id
+
+        sql += '''
             ORDER BY username ASC
             LIMIT :limit
-        ''', {'prefix': f'{clean_p}%', 'limit': limit})
+        '''
+        return await self.fetch_many(sql, params)
 
     async def follow(self, follower_id: str, following_id: str) -> None:
         # 1. Insert follow relationship

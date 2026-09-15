@@ -15,12 +15,13 @@ router = APIRouter()
 @router.get('/trending', response_model=Dict[str, Any])
 async def get_trending_reviews(
     limit: int = Query(10, description="Number of items to fetch"),
+    offset: int = Query(0, description="Offset for pagination"),
     db: AsyncSession = Depends(get_db),
     current_user_id: Optional[str] = Depends(get_current_user_id_optional)
 ):
     service = SocialService(db)
     user_uuid = UUID(current_user_id) if current_user_id else None
-    items = await service.get_trending_reviews(limit, current_user_id=user_uuid)
+    items = await service.get_trending_reviews(limit, offset=offset, current_user_id=user_uuid)
     return ok({"items": items})
 
 @router.get('/of-the-day', response_model=Dict[str, Any])

@@ -2078,11 +2078,26 @@ class ContentService:
 
     async def get_hot_reviews(self, limit: int = 10) -> List[Dict[str, Any]]:
         result = await self.db.execute(text('''
-            SELECT r.id, r.star_rating, r.text_review, r.likes_count, r.created_at, c.id as content_id, c.title as content_title, c.poster_url, c.content_type, p.id as author_id, p.username, p.display_name, p.avatar_url, p.is_verified
-            FROM reviews r JOIN content c ON c.id = r.content_id JOIN profiles p ON p.id = r.user_id
-            WHERE r.is_deleted = false 
-            -- AND r.created_at > now() - interval '30 days' 
-            ORDER BY r.likes_count DESC, r.created_at DESC LIMIT :limit
+            WITH ranked_reviews AS (
+                SELECT r.id, r.star_rating, r.text_review, r.likes_count, r.created_at, 
+                       c.id as content_id, c.title as content_title, c.poster_url, c.content_type, 
+                       p.id as author_id, p.username, p.display_name, p.avatar_url, p.is_verified,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY r.user_id 
+                           ORDER BY r.created_at DESC
+                       ) as user_rn
+                FROM reviews r 
+                JOIN content c ON c.id = r.content_id 
+                JOIN profiles p ON p.id = r.user_id
+                WHERE r.is_deleted = false 
+                  AND r.text_review IS NOT NULL 
+                  AND length(trim(r.text_review)) > 0
+            )
+            SELECT id, star_rating, text_review, likes_count, created_at, content_id, content_title, poster_url, content_type, author_id, username, display_name, avatar_url, is_verified
+            FROM ranked_reviews
+            WHERE user_rn <= 2
+            ORDER BY user_rn ASC, created_at DESC
+            LIMIT :limit
         '''), {'limit': limit})
         return [dict(row) for row in result.mappings()]
 

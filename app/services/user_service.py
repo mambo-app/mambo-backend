@@ -143,6 +143,8 @@ class UserService:
         # Social Status (if viewer is present)
         profile_dict['is_following'] = False
         profile_dict['is_friend'] = False
+        profile_dict['is_blocked'] = False
+        profile_dict['is_blocking'] = False
         profile_dict['friend_request_sent_id'] = None
         profile_dict['friend_request_received_id'] = None
 
@@ -152,6 +154,19 @@ class UserService:
             u_repo = UserRepository(self.db)
             s_repo = SocialRepository(self.db)
             
+            # Check block status in either direction
+            block_check = await self.db.execute(text('''
+                SELECT blocker_id, blocked_id FROM blocked_users
+                WHERE (blocker_id = CAST(:vid AS UUID) AND blocked_id = CAST(:oid AS UUID))
+                   OR (blocker_id = CAST(:oid AS UUID) AND blocked_id = CAST(:vid AS UUID))
+            '''), {'vid': viewer_id, 'oid': owner_id})
+            blocks = block_check.mappings().all()
+            if blocks:
+                profile_dict['is_blocked'] = True
+                for b in blocks:
+                    if str(b['blocker_id']) == viewer_id:
+                        profile_dict['is_blocking'] = True
+
             profile_dict['is_following'] = await u_repo.is_following(viewer_id, owner_id)
             profile_dict['is_friend'] = await s_repo.check_is_friend(UUID(owner_id), UUID(viewer_id))
             
@@ -734,6 +749,13 @@ class UserService:
         from app.repositories.user_repo import UserRepository
         repo = UserRepository(self.db)
         await repo.delete_account(user_id)
+        
+        # Permanently delete user from Supabase Auth
+        try:
+            supabase_admin.auth.admin.delete_user(user_id)
+        except Exception as e:
+            logger.error(f"Failed to delete Supabase auth user {user_id}: {e}")
+
         await self.invalidate_profile_cache(user_id)
         await self.db.commit()
 
@@ -1094,7 +1116,7 @@ class UserService:
         if not clean_q:
             return await repo.get_trending_creators(limit=6, viewer_id=viewer_id)
             
-        return await repo.search(clean_q, limit, 0)
+        return await repo.search(clean_q, limit, 0, viewer_id=viewer_id)
 
     async def toggle_person_favorite(self, user_id: str, person_id: str, name: str, profile_url: Optional[str], is_actor: bool) -> bool:
         from app.repositories.user_repo import UserRepository

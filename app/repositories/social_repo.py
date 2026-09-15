@@ -512,33 +512,41 @@ class SocialRepository(BaseRepository):
 
         return items
 
-    async def get_trending_reviews(self, limit: int = 5, current_user_id: UUID | None = None) -> list[dict]:
-        # If limit is 10 (the explore feed default), override to 40 and sort by latest first
-        if limit == 10:
-            actual_limit = 40
-            order_sql = "r.created_at DESC"
-        else:
-            actual_limit = limit
-            order_sql = "(r.likes_count * 2 + r.comments_count) DESC, r.created_at DESC"
-
-        return await self.fetch_many(f'''
-            SELECT r.*, 
-                   r.rating as star_rating, 
-                   r.is_spoiler as contains_spoiler,
-                   p.username, p.avatar_url, p.is_verified, 
-                   c.title as content_title, 
-                   c.poster_url as content_poster,
+    async def get_trending_reviews(self, limit: int = 10, offset: int = 0, current_user_id: UUID | None = None) -> list[dict]:
+        return await self.fetch_many('''
+            WITH interleaved AS (
+                SELECT r.id, r.user_id, r.content_id, r.rating, r.star_rating, r.text_review, 
+                       r.contains_spoiler, r.is_spoiler, r.likes_count, r.comments_count, 
+                       r.watch_history_id, r.created_at, r.updated_at,
+                       p.username, p.display_name, p.avatar_url, p.is_verified, 
+                       c.title as content_title, c.poster_url as content_poster,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY r.user_id 
+                           ORDER BY r.created_at DESC
+                       ) as user_rank,
+                       DENSE_RANK() OVER (
+                           ORDER BY r.user_id
+                       ) as user_group
+                FROM reviews r
+                JOIN profiles p ON p.id = r.user_id
+                LEFT JOIN content c ON c.id = r.content_id
+                WHERE r.is_deleted = false
+            )
+            SELECT i.id, i.user_id, i.content_id, i.rating, 
+                   COALESCE(i.star_rating, i.rating) as star_rating, 
+                   i.text_review, 
+                   COALESCE(i.contains_spoiler, i.is_spoiler, false) as contains_spoiler,
+                   i.likes_count, i.comments_count, i.watch_history_id, i.created_at, i.updated_at,
+                   i.username, i.display_name, i.avatar_url, i.is_verified, 
+                   i.content_title, i.content_poster,
                    CASE WHEN rl.user_id IS NOT NULL THEN true ELSE false END AS is_liked,
                    COALESCE(wh.watch_type = 'rewatch', false) as is_rewatch
-            FROM reviews r
-            JOIN profiles p ON p.id = r.user_id
-            LEFT JOIN content c ON c.id = r.content_id
-            LEFT JOIN review_likes rl ON rl.review_id = r.id AND rl.user_id = :current_user_id
-            LEFT JOIN watch_history wh ON wh.id = r.watch_history_id
-            WHERE r.is_deleted = false
-            ORDER BY {order_sql}
-            LIMIT :limit
-        ''', {'limit': actual_limit, 'current_user_id': current_user_id})
+            FROM interleaved i
+            LEFT JOIN review_likes rl ON rl.review_id = i.id AND rl.user_id = :current_user_id
+            LEFT JOIN watch_history wh ON wh.id = i.watch_history_id
+            ORDER BY i.user_rank ASC, i.user_group ASC
+            LIMIT :limit OFFSET :offset
+        ''', {'limit': limit, 'offset': offset, 'current_user_id': current_user_id})
 
     async def get_reviews_by_content(self, content_id: UUID, limit: int = 20, offset: int = 0, current_user_id: UUID | None = None, tmdb_id: int | None = None, title: str | None = None) -> list[dict]:
         return await self.fetch_many('''
@@ -607,12 +615,42 @@ class SocialRepository(BaseRepository):
             WHERE (sender_id = :user_id AND receiver_id = :target_id)
                OR (sender_id = :target_id AND receiver_id = :user_id)
         ''', {'user_id': user_id, 'target_id': target_id})
+        # Sever follow relationships in both directions
+        res1 = await self.db.execute(text('''
+            DELETE FROM follows
+            WHERE (follower_id = :user_id AND following_id = :target_id)
+               OR (follower_id = :target_id AND following_id = :user_id)
+            RETURNING follower_id, following_id
+        '''), {'user_id': user_id, 'target_id': target_id})
+        deleted_follows = res1.mappings().all()
+        for f in deleted_follows:
+            await self.execute('''
+                UPDATE user_stats
+                SET following_count = GREATEST(0, COALESCE(following_count, 0) - 1),
+                    updated_at = now()
+                WHERE user_id = :uid
+            ''', {'uid': f['follower_id']})
+            await self.execute('''
+                UPDATE user_stats
+                SET followers_count = GREATEST(0, COALESCE(followers_count, 0) - 1),
+                    updated_at = now()
+                WHERE user_id = :uid
+            ''', {'uid': f['following_id']})
 
     async def unblock_user(self, user_id: UUID, target_id: UUID) -> None:
         await self.execute('''
             DELETE FROM blocked_users
             WHERE blocker_id = :user_id AND blocked_id = :target_id
         ''', {'user_id': user_id, 'target_id': target_id})
+
+    async def get_blocked_users(self, user_id: UUID) -> list[dict]:
+        return await self.fetch_many('''
+            SELECT p.id, p.username, p.display_name, p.avatar_url
+            FROM blocked_users bu
+            JOIN profiles p ON p.id = bu.blocked_id
+            WHERE bu.blocker_id = :user_id
+            ORDER BY bu.created_at DESC
+        ''', {'user_id': user_id})
 
     # --- Migration / Export ---
     async def get_export_data(self, user_id: UUID) -> dict:

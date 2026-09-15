@@ -485,8 +485,8 @@ class SocialService:
             raise HTTPException(status_code=404, detail="Review not found")
         return review
 
-    async def get_trending_reviews(self, limit: int = 5, current_user_id: UUID | None = None) -> list[dict]:
-        return await self.repo.get_trending_reviews(limit, current_user_id)
+    async def get_trending_reviews(self, limit: int = 10, offset: int = 0, current_user_id: UUID | None = None) -> list[dict]:
+        return await self.repo.get_trending_reviews(limit, offset, current_user_id)
 
     async def get_review_of_the_day(self, current_user_id: UUID | None = None) -> dict | None:
         """Picks a random trending review that changes every 24 hours."""
@@ -526,6 +526,9 @@ class SocialService:
     async def unblock_user(self, user_id: UUID, target_id: UUID) -> dict:
         await self.repo.unblock_user(user_id, target_id)
         return {"message": "User unblocked successfully"}
+
+    async def get_blocked_users(self, user_id: UUID) -> list[dict]:
+        return await self.repo.get_blocked_users(user_id)
 
     async def update_review(self, user_id: UUID, review_id: UUID, data: dict) -> dict:
         result = await self.repo.update_review(review_id, user_id, data)
