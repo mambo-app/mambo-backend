@@ -1841,7 +1841,10 @@ class ContentService:
                     for r in remote_results:
                         tid = r.get('tmdb_id') or r.get('id')
                         mid = r.get('mal_id')
-                        key = f"tmdb_{tid}" if tid else (f"mal_{mid}" if mid else f"{r.get('title','').strip().lower()}_{r.get('content_type')}")
+                        ctype = r.get('content_type', 'movie')
+                        if tid and (isinstance(tid, int) or (isinstance(tid, str) and not tid.startswith('tmdb_'))):
+                            r['id'] = f"tmdb_{ctype}_{tid}"
+                        key = f"tmdb_{tid}" if tid else (f"mal_{mid}" if mid else f"{r.get('title','').strip().lower()}_{ctype}")
                         if key not in existing_keys:
                             rows.append(r)
                             existing_keys.add(key)
@@ -2083,13 +2086,24 @@ class ContentService:
         '''), {'limit': limit})
         return [dict(row) for row in result.mappings()]
 
-    async def get_content_by_id(self, content_id: str, user_id: Optional[str] = None) -> Optional[ContentResponse]:
-        cache_key = CacheKeys.content(content_id)
+    async def get_content_by_id(self, content_id: str, user_id: Optional[str] = None, content_type: Optional[str] = None) -> Optional[ContentResponse]:
+        cache_key = CacheKeys.content(f"{content_id}_{content_type or ''}")
         if not user_id:
             cached = await cache.get(cache_key)
             if cached: return ContentResponse.model_validate(cached)
         
         try:
+            # Determine target_type from parameter or content_id prefix
+            target_type = content_type
+            if not target_type:
+                cid_lower = str(content_id).lower()
+                if 'series' in cid_lower or 'tv' in cid_lower or 'show' in cid_lower:
+                    target_type = 'series'
+                elif 'anime' in cid_lower:
+                    target_type = 'anime'
+                elif 'movie' in cid_lower:
+                    target_type = 'movie'
+
             # 1. Try local DB by UUID
             is_uuid = False
             try:
@@ -2110,7 +2124,7 @@ class ContentService:
                             t_id = mapped.get("tmdb_id")
                             ctype = mapped.get("content_type", "movie")
                             if t_id:
-                                db_res = await self.db.execute(text("SELECT * FROM content WHERE tmdb_id = :tid LIMIT 1"), {"tid": t_id})
+                                db_res = await self.db.execute(text("SELECT * FROM content WHERE tmdb_id = :tid AND content_type = :ct LIMIT 1"), {"tid": t_id, "ct": ctype})
                                 row = db_res.mappings().one_or_none()
                                 if not row:
                                     ext_data = await self.tmdb_client.get_series_details(t_id) if ctype in ['series', 'tv'] else await self.tmdb_client.get_movie_details(t_id)
@@ -2134,19 +2148,31 @@ class ContentService:
                     num_id = None
 
             if not row and num_id is not None:
-                res = await self.db.execute(text("SELECT * FROM content WHERE tmdb_id = :id OR mal_id = :id"), {"id": num_id})
-                row = res.mappings().one_or_none()
+                if target_type:
+                    norm_ct = {'movies': 'movie', 'tv': 'series', 'show': 'series'}.get(target_type.lower(), target_type.lower())
+                    res = await self.db.execute(text("SELECT * FROM content WHERE (tmdb_id = :id OR mal_id = :id) AND content_type = :ct LIMIT 1"), {"id": num_id, "ct": norm_ct})
+                    row = res.mappings().one_or_none()
+                if not row:
+                    res = await self.db.execute(text("SELECT * FROM content WHERE tmdb_id = :id OR mal_id = :id LIMIT 1"), {"id": num_id})
+                    row = res.mappings().one_or_none()
 
             # 3. Live TMDB fetch fallback if valid numeric ID
             if not row and num_id is not None:
                 try:
-                    logger.info(f"Content {content_id} (digits {num_id}) not in DB. Attempting auto-import from TMDB.")
+                    logger.info(f"Content {content_id} (target_type: {target_type}, digits {num_id}) not in DB. Attempting auto-import from TMDB.")
                     ext_data = None
-                    if 'series' in content_id or 'tv' in content_id:
+                    if target_type in ['series', 'tv', 'show', 'anime']:
                         ext_data = await self.tmdb_client.get_series_details(num_id)
-                    if not ext_data or not ext_data.get('title'):
+                        if ext_data and not ext_data.get('content_type'):
+                            ext_data['content_type'] = 'anime' if target_type == 'anime' else 'series'
+                    elif target_type == 'movie':
                         ext_data = await self.tmdb_client.get_movie_details(num_id)
-                    if not ext_data or not ext_data.get('title'):
+                        if ext_data and not ext_data.get('content_type'):
+                            ext_data['content_type'] = 'movie'
+
+                    if not ext_data or not (ext_data.get('title') or ext_data.get('name')):
+                        ext_data = await self.tmdb_client.get_movie_details(num_id)
+                    if not ext_data or not (ext_data.get('title') or ext_data.get('name')):
                         ext_data = await self.tmdb_client.get_series_details(num_id)
                     
                     if ext_data and (ext_data.get('title') or ext_data.get('name')):

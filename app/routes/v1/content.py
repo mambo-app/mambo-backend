@@ -14,13 +14,14 @@ router = APIRouter(tags=['content'])
 @router.get('/{content_id}')
 async def get_content_details(
     content_id: str,
+    content_type: Optional[str] = Query(None, description="movie, series, anime"),
     db: AsyncSession = Depends(get_db),
-    user_id: str = Depends(get_current_user_id_optional)
+    user_id: Optional[str] = Depends(get_current_user_id_optional)
 ):
     from app.services.content_service import ContentService
     from app.models.common import ok
     service = ContentService(db)
-    content = await service.get_content_by_id(content_id, user_id)
+    content = await service.get_content_by_id(content_id, user_id, content_type=content_type)
     if not content:
         raise HTTPException(status_code=404, detail="Content not found")
     return ok(content)
