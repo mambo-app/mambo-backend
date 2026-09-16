@@ -351,14 +351,42 @@ class SocialService:
         if not text_review or not text_review.strip():
             raise HTTPException(status_code=400, detail="Review text is mandatory. Use 'Rate' for star-only ratings.")
 
-        # Check if the latest watch session is unreviewed
-        # Check if there is a recent unreviewed watch session (within 12 hours)
+        # Check if watch_history_id already has an attached review
+        if watch_history_id:
+            existing_wh_rev = (await self.db.execute(text('''
+                SELECT review_id FROM watch_history WHERE id = :wid AND user_id = :uid
+            '''), {'wid': watch_history_id, 'uid': user_id})).scalar_one_or_none()
+            if existing_wh_rev:
+                return await self.update_review(user_id, existing_wh_rev, {
+                    'star_rating': star_rating,
+                    'text_review': text_review,
+                    'contains_spoiler': contains_spoiler,
+                    'tagged_seasons': tagged_seasons,
+                    'tagged_episodes': tagged_episodes,
+                    'review_type': review_type
+                })
+
+        # Check if an existing review already exists for this content & user
+        existing_review = await self.repo.find_existing_review(
+            user_id, content_id, review_type, tagged_seasons or [], tagged_episodes or []
+        )
+        if existing_review:
+            return await self.update_review(user_id, existing_review['id'], {
+                'star_rating': star_rating,
+                'text_review': text_review,
+                'contains_spoiler': contains_spoiler,
+                'tagged_seasons': tagged_seasons,
+                'tagged_episodes': tagged_episodes,
+                'review_type': review_type
+            })
+
+        # Check if there is an unreviewed watch session
         session_res = await self.db.execute(text('''
             SELECT id, review_id, watched_at FROM watch_history 
-            WHERE user_id = :uid AND content_id = :cid 
+            WHERE user_id = :uid AND content_id = :cid AND review_id IS NULL
             ORDER BY watched_at DESC LIMIT 1
         '''), {'uid': user_id, 'cid': content_id})
-        latest_session = session_res.mappings().one_or_none()
+        unreviewed_session = session_res.mappings().one_or_none()
 
         from app.services.action_service import ActionService
         from app.models.action import ActionType
@@ -377,17 +405,6 @@ class SocialService:
         ), {"uid": user_id, "cid": content_id})
         status_row = status_res.mappings().one_or_none() or {}
         is_watched = status_row.get('is_watched') or False
-
-        from datetime import datetime, timezone
-        unreviewed_session = None
-        if latest_session and latest_session.get('review_id') is None:
-            w_time = latest_session.get('watched_at')
-            if w_time:
-                now_utc = datetime.now(timezone.utc)
-                if w_time.tzinfo is None:
-                    w_time = w_time.replace(tzinfo=timezone.utc)
-                if (now_utc - w_time).total_seconds() < 43200:
-                    unreviewed_session = latest_session
 
         target_wh_id = watch_history_id or (unreviewed_session['id'] if unreviewed_session else None)
         if target_wh_id:
@@ -426,6 +443,13 @@ class SocialService:
             await self.db.execute(text('''
                 UPDATE watch_history SET rating = :r WHERE id = :wid
             '''), {'r': star_rating, 'wid': watch_history_id})
+
+        # Update rating on user_content_status
+        await self.db.execute(text('''
+            UPDATE user_content_status
+            SET rating = :r, updated_at = now()
+            WHERE user_id = :uid AND content_id = :cid
+        '''), {'r': star_rating, 'uid': user_id, 'cid': content_id})
 
         # 3. Create review record
         review = await self.repo.create_review(
@@ -535,6 +559,20 @@ class SocialService:
         if not result:
             raise HTTPException(status_code=404, detail="Review not found or not authorized")
         
+        star_rating = data.get('star_rating') if 'star_rating' in data else data.get('rating')
+        if star_rating is not None:
+            await self.db.execute(text('''
+                UPDATE watch_history
+                SET rating = :r
+                WHERE review_id = :rid OR id = (SELECT watch_history_id FROM reviews WHERE id = :rid)
+            '''), {'r': star_rating, 'rid': review_id})
+
+            await self.db.execute(text('''
+                UPDATE user_content_status
+                SET rating = :r, updated_at = now()
+                WHERE user_id = :uid AND content_id = :cid
+            '''), {'r': star_rating, 'uid': user_id, 'cid': result['content_id']})
+
         # Log activity
         from app.services.action_service import ActionService
         action_svc = ActionService(self.db)
@@ -548,7 +586,7 @@ class SocialService:
             activity_type=activity_type,
             content_id=result['content_id'],
             review_id=review_id,
-            details={'rating': data.get('star_rating')}
+            details={'rating': star_rating or result.get('star_rating')}
         )
         
         await self.db.commit()

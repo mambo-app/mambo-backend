@@ -383,24 +383,29 @@ class SocialRepository(BaseRepository):
             ''', {'uid': user_id})
         return review
 
-    async def find_existing_review(self, user_id: UUID, content_id: UUID, review_type: str, tagged_seasons: list[int] = [], tagged_episodes: list[int] = []) -> dict | None:
-        # Array comparison in Postgres requires careful handling. 
-        # We use ARRAY[...]::int[] to ensure types match.
+    async def find_existing_review(self, user_id: UUID, content_id: UUID, review_type: str = "overall", tagged_seasons: list[int] = [], tagged_episodes: list[int] = []) -> dict | None:
         return await self.fetch_one('''
             SELECT id FROM reviews 
             WHERE user_id = :user_id 
             AND content_id = :content_id 
             AND review_type = :review_type
-            AND tagged_seasons = CAST(:seasons AS int[])
-            AND tagged_episodes = CAST(:episodes AS int[])
+            AND (
+                (tagged_seasons IS NULL AND CAST(:seasons AS int[]) = '{}')
+                OR tagged_seasons = CAST(:seasons AS int[])
+            )
+            AND (
+                (tagged_episodes IS NULL AND CAST(:episodes AS int[]) = '{}')
+                OR tagged_episodes = CAST(:episodes AS int[])
+            )
             AND is_deleted = false
+            ORDER BY created_at DESC
             LIMIT 1
         ''', {
             'user_id': user_id,
             'content_id': content_id,
             'review_type': review_type,
-            'seasons': tagged_seasons,
-            'episodes': tagged_episodes
+            'seasons': tagged_seasons or [],
+            'episodes': tagged_episodes or []
         })
 
     async def update_review(self, review_id: UUID, user_id: UUID, data: dict) -> dict | None:

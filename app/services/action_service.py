@@ -884,9 +884,9 @@ class ActionService:
         if watch_history_id:
             del_res = await self.db.execute(text('''
                 DELETE FROM watch_history
-                WHERE id = :wid AND user_id = :uid AND content_id = :cid
-                RETURNING id, rating, review_id
-            '''), {'wid': watch_history_id, 'uid': user_id, 'cid': content_id})
+                WHERE id = :wid AND user_id = :uid
+                RETURNING id, rating, review_id, content_id
+            '''), {'wid': watch_history_id, 'uid': user_id})
         else:
             del_res = await self.db.execute(text('''
                 DELETE FROM watch_history
@@ -895,7 +895,7 @@ class ActionService:
                     WHERE user_id = :uid AND content_id = :cid
                     ORDER BY watched_at DESC LIMIT 1
                 )
-                RETURNING id, rating, review_id
+                RETURNING id, rating, review_id, content_id
             '''), {'uid': user_id, 'cid': content_id})
 
         deleted_row = del_res.mappings().one_or_none()
@@ -904,6 +904,7 @@ class ActionService:
 
         wid = deleted_row['id']
         rid = deleted_row['review_id']
+        content_id = deleted_row['content_id']
 
         # 2. Delete attached review if present
         if rid:

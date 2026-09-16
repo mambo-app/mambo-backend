@@ -48,48 +48,44 @@ class ReviewService:
             SELECT content_id, user_id FROM reviews WHERE id = :rid
         '''), {'rid': r_uuid})).mappings().first()
 
-        # Clear review_id link in watch_history if present
+        if not review_row:
+            raise NotFoundError('Review not found')
+
+        actual_user_id = review_row['user_id']
+        content_id = review_row['content_id']
+
+        if str(actual_user_id) != str(u_uuid):
+            raise ForbiddenError('Not authorized to delete this review')
+
+        # Clear review_id link in watch_history if present (Option A: retains watch event and score)
         await self.db.execute(text('''
             UPDATE watch_history SET review_id = NULL WHERE review_id = :rid
         '''), {'rid': r_uuid})
 
         # Hard delete from reviews table
-        result = await self.db.execute(text('''
-            DELETE FROM reviews
-            WHERE id = :review_id AND user_id = :user_id
-            RETURNING id, user_id, content_id
-        '''), {'review_id': r_uuid, 'user_id': u_uuid})
-        
-        row = result.mappings().first()
-        if not row:
-            # Fallback: attempt delete if review belongs to user
-            fallback = await self.db.execute(text('''
-                DELETE FROM reviews WHERE id = :review_id RETURNING id, user_id, content_id
-            '''), {'review_id': r_uuid})
-            row = fallback.mappings().first()
-            if not row:
-                raise NotFoundError('Review not found')
+        await self.db.execute(text('''
+            DELETE FROM reviews WHERE id = :rid AND user_id = :uid
+        '''), {'rid': r_uuid, 'uid': actual_user_id})
 
-        actual_user_id = row['user_id']
-        content_id = row['content_id']
+        # Clean up activity log rows for ONLY this specific review
+        await self.db.execute(text('''
+            DELETE FROM activity_log 
+            WHERE review_id = :rid 
+               OR (user_id = :uid AND content_id = :cid AND activity_type IN ('reviewed', 'updated_review'))
+        '''), {'rid': r_uuid, 'uid': actual_user_id, 'cid': content_id})
 
-        # Clear the rating in user_content_status if no other review exists
-        other_review = (await self.db.execute(text('''
-            SELECT id FROM reviews WHERE user_id = :uid AND content_id = :cid AND id != :rid LIMIT 1
-        '''), {'uid': actual_user_id, 'cid': content_id, 'rid': r_uuid})).scalar_one_or_none()
+        # Set user_content_status.rating to latest watch_history rating if present (Option A)
+        latest_r = (await self.db.execute(text('''
+            SELECT rating FROM watch_history 
+            WHERE user_id = :uid AND content_id = :cid AND rating IS NOT NULL 
+            ORDER BY watched_at DESC LIMIT 1
+        '''), {'uid': actual_user_id, 'cid': content_id})).scalar()
 
-        if not other_review:
-            # No other review for this content — clear rating from status
-            await self.db.execute(text('''
-                UPDATE user_content_status
-                SET rating = NULL, updated_at = now()
-                WHERE user_id = :uid AND content_id = :cid
-            '''), {'uid': actual_user_id, 'cid': content_id})
-            
-            # Clean up activity log rows for ONLY this specific review
-            await self.db.execute(text('''
-                DELETE FROM activity_log WHERE review_id = :rid
-            '''), {'rid': r_uuid})
+        await self.db.execute(text('''
+            UPDATE user_content_status
+            SET rating = :r, updated_at = now()
+            WHERE user_id = :uid AND content_id = :cid
+        '''), {'r': latest_r, 'uid': actual_user_id, 'cid': content_id})
 
         # Update stats
         await self.db.execute(text('''
