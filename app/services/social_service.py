@@ -365,20 +365,20 @@ class SocialService:
                     'tagged_episodes': tagged_episodes,
                     'review_type': review_type
                 })
-
-        # Check if an existing review already exists for this content & user
-        existing_review = await self.repo.find_existing_review(
-            user_id, content_id, review_type, tagged_seasons or [], tagged_episodes or []
-        )
-        if existing_review:
-            return await self.update_review(user_id, existing_review['id'], {
-                'star_rating': star_rating,
-                'text_review': text_review,
-                'contains_spoiler': contains_spoiler,
-                'tagged_seasons': tagged_seasons,
-                'tagged_episodes': tagged_episodes,
-                'review_type': review_type
-            })
+        else:
+            # Only search for an existing review if NO watch_history_id was provided
+            existing_review = await self.repo.find_existing_review(
+                user_id, content_id, review_type, tagged_seasons or [], tagged_episodes or []
+            )
+            if existing_review:
+                return await self.update_review(user_id, existing_review['id'], {
+                    'star_rating': star_rating,
+                    'text_review': text_review,
+                    'contains_spoiler': contains_spoiler,
+                    'tagged_seasons': tagged_seasons,
+                    'tagged_episodes': tagged_episodes,
+                    'review_type': review_type
+                })
 
         # Check if there is an unreviewed watch session
         session_res = await self.db.execute(text('''

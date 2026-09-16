@@ -40,3 +40,5 @@ class ContentActionResponse(BaseModel):
     action: ActionType
     content_id: UUID
     is_permanent: bool = True
+    watch_history_id: Optional[UUID] = None
+

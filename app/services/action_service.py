@@ -61,6 +61,7 @@ class ActionService:
             ), {"uid": user_id, "cid": content_id})
             current_status = status_res.mappings().one_or_none() or {}
 
+            watch_id = None
             if req.action == ActionType.watch:
                 if current_status.get('is_watched'):
                     # REVERT WATCH (Toggle OFF)
@@ -69,10 +70,10 @@ class ActionService:
                     await self._remove_activity(user_id, ['watched', 'rewatched'], content_id=content_id)
                     await self._remove_from_collection(user_id, content_id, 'Watched')
                 else:
-                    await self._handle_watch(user_id, content_id, req.action)
+                    watch_id = await self._handle_watch(user_id, content_id, req.action)
                     await self._sync_to_collection(user_id, content_id, 'Watched')
             elif req.action == ActionType.rewatch:
-                await self._handle_watch(user_id, content_id, req.action)
+                watch_id = await self._handle_watch(user_id, content_id, req.action)
                 await self._sync_to_collection(user_id, content_id, 'Watched')  # idempotent, ON CONFLICT DO NOTHING
             elif req.action == ActionType.drop:
                 if current_status.get('is_dropped'):
@@ -424,7 +425,8 @@ class ActionService:
                 status="success",
                 action=req.action,
                 content_id=content_id,
-                is_permanent=True
+                is_permanent=True,
+                watch_history_id=watch_id
             )
         except HTTPException:
             await self.db.rollback()
@@ -906,17 +908,30 @@ class ActionService:
         rid = deleted_row['review_id']
         content_id = deleted_row['content_id']
 
-        # 2. Delete attached review if present
+        # 2. Delete attached review if present (check review_id on watch_history OR watch_history_id on reviews)
         if rid:
             await self.db.execute(text('''
                 DELETE FROM reviews WHERE id = :rid
             '''), {'rid': rid})
+        else:
+            rev_res = await self.db.execute(text('''
+                DELETE FROM reviews WHERE watch_history_id = :wid AND user_id = :uid
+                RETURNING id
+            '''), {'wid': wid, 'uid': user_id})
+            deleted_revs = rev_res.mappings().all()
+            if deleted_revs:
+                rid = deleted_revs[0]['id']
 
-        # 3. Delete activity log entry for this specific watch history ID
+        # 3. Delete activity log entry for this specific watch history ID and/or review ID
         await self.db.execute(text('''
             DELETE FROM activity_log 
-            WHERE user_id = :uid AND content_id = :cid AND (review_id = :rid OR details->>'watch_history_id' = :wid_str)
-        '''), {'uid': user_id, 'cid': content_id, 'rid': rid, 'wid_str': str(wid)})
+            WHERE user_id = :uid AND content_id = :cid 
+              AND (
+                review_id = :rid 
+                OR details->>'watch_history_id' = :wid_str
+                OR details->>'review_id' = :rid_str
+              )
+        '''), {'uid': user_id, 'cid': content_id, 'rid': rid, 'wid_str': str(wid), 'rid_str': str(rid) if rid else ''})
 
         # 4. Recalculate watch_count and latest status
         count_res = await self.db.execute(text('''
@@ -925,6 +940,7 @@ class ActionService:
         new_count = count_res.scalar() or 0
 
         if new_count == 0:
+            # Full reset to unwatched ONLY when all watches are deleted
             await self.db.execute(text('''
                 UPDATE user_content_status
                 SET is_watched = false, status = 'none', watch_count = 0, rating = NULL, updated_at = now()
@@ -932,12 +948,15 @@ class ActionService:
             '''), {'uid': user_id, 'cid': content_id})
             await self._remove_from_collection(user_id, content_id, 'Watched')
             await self.db.execute(text('''
+                DELETE FROM reviews WHERE user_id = :uid AND content_id = :cid
+            '''), {'uid': user_id, 'cid': content_id})
+            await self.db.execute(text('''
                 DELETE FROM activity_log
                 WHERE user_id = :uid AND content_id = :cid
                   AND activity_type IN ('watched', 'rewatched', 'rated', 'reviewed', 'updated_review', 'updated_rating')
             '''), {'uid': user_id, 'cid': content_id})
         else:
-            # Fetch latest watched_at and latest rating
+            # Fetch latest watched_at and latest rating from remaining watch_history entries
             latest_res = await self.db.execute(text('''
                 SELECT watched_at, rating FROM watch_history
                 WHERE user_id = :uid AND content_id = :cid
@@ -952,6 +971,8 @@ class ActionService:
                 SET watch_count = :cnt,
                     last_watched_at = :last_dt,
                     rating = :last_r,
+                    is_watched = true,
+                    status = 'completed',
                     updated_at = now()
                 WHERE user_id = :uid AND content_id = :cid
             '''), {'cnt': new_count, 'last_dt': last_dt, 'last_r': last_r, 'uid': user_id, 'cid': content_id})
