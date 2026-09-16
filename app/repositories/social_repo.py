@@ -649,7 +649,7 @@ class SocialRepository(BaseRepository):
             FROM blocked_users bu
             JOIN profiles p ON p.id = bu.blocked_id
             WHERE bu.blocker_id = :user_id
-            ORDER BY bu.created_at DESC
+            ORDER BY p.username ASC
         ''', {'user_id': user_id})
 
     # --- Migration / Export ---
