@@ -781,8 +781,8 @@ class ActionService:
         
         if not coll:
             stmt_create = text('''
-                INSERT INTO collections (user_id, name, collection_type, is_default, is_deletable)
-                VALUES (:uid, :name, 'system', true, false)
+                INSERT INTO collections (user_id, name, collection_type, is_default, is_deletable, is_public, visibility)
+                VALUES (:uid, :name, 'system', true, false, true, 'public')
                 RETURNING id
             ''')
             res = await self.db.execute(stmt_create, {'uid': user_id, 'name': collection_name})

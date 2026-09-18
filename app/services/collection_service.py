@@ -78,9 +78,10 @@ class CollectionService:
             )
             AND (
                 c.visibility = 'public' 
+                OR (c.visibility IS NULL AND (c.is_public = true OR c.is_default = true))
                 OR c.user_id = CAST(:viewer_id AS UUID)
                 OR (
-                    c.visibility = 'friends_only' 
+                    (c.visibility = 'friends_only' OR (c.visibility IS NULL AND c.is_public = true))
                     AND CAST(:viewer_id AS UUID) IS NOT NULL 
                     AND EXISTS (
                         SELECT 1 FROM friends 

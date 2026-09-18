@@ -103,12 +103,12 @@ class AuthService:
             for name, desc, is_public, is_def, is_pin, pin_ord in default_collections:
                 await self.db.execute(text('''
                     INSERT INTO collections (
-                        user_id, name, description, is_public, 
+                        user_id, name, description, is_public, visibility,
                         collection_type, is_default, is_deletable,
                         is_pinned, pin_order
                     )
                     VALUES (
-                        :uid, :name, :desc, :public, 
+                        :uid, :name, :desc, :public, 'public',
                         :type, :is_def, false,
                         :is_pin, :pin_ord
                     )
@@ -398,12 +398,12 @@ class AuthService:
             for name, desc, is_public, is_def, is_pin, pin_ord in default_collections:
                 await self.db.execute(text('''
                     INSERT INTO collections (
-                        user_id, name, description, is_public, 
+                        user_id, name, description, is_public, visibility,
                         collection_type, is_default, is_deletable,
                         is_pinned, pin_order
                     )
                     VALUES (
-                        :uid, :name, :desc, :public, 
+                        :uid, :name, :desc, :public, 'public',
                         :type, :is_def, false,
                         :is_pin, :pin_ord
                     )
